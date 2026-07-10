@@ -1,0 +1,23 @@
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.api import health_routes
+
+app = FastAPI(title="InCite API")
+
+# Loosened for local dev — tighten to your actual frontend origin before deploying.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(health_routes.router)
+
+# More routers get added here as they're built:
+# app.include_router(auth_routes.router)
+# app.include_router(collection_routes.router)
+# app.include_router(document_routes.router)
+# app.include_router(chat_routes.router)
