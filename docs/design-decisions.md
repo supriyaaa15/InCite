@@ -86,4 +86,38 @@ this becomes something to track systematically rather than eyeball once.
 Possible causes to investigate later: context size (5 chunks in the prompt),
 model choice (flash vs a faster/lighter variant), network latency to the API.
 
+## [Day 7-8] JWT auth working end-to-end
 
+Decision: layered auth flow — auth_routes.py (HTTP) -> auth_service.py
+(business rules) -> user_repository.py (DB queries) -> models/user.py.
+get_current_user in core/deps.py is the single shared dependency every
+future protected route will use.
+Result: verified via Swagger UI — POST /auth/register creates a user
+with a bcrypt-hashed password, POST /auth/login returns a valid JWT,
+GET /auth/me (protected) correctly resolves the token back into the
+authenticated user's id/email/created_at. Full chain confirmed working.
+Security decision: login returns the same error for "no such user" and
+"wrong password" — revealing which one it was allows attackers to enumerate
+valid registered emails.
+
+## [Day 7-8] Fixed: passlib + bcrypt version incompatibility
+
+Problem: POST /auth/register failed with ValueError: password cannot be longer than 72 bytes even for short passwords. Root cause: passlib
+1.7.4's internal self-test (detect_wrap_bug) is incompatible with bcrypt
+4.1+'s changed API — a known compatibility issue between the two libraries,
+not a bug in application code.
+Fix: pinned bcrypt==4.0.1 explicitly in requirements.txt alongside
+passlib[bcrypt]==1.7.4.
+
+## [Day 7-8] Docker build speed: pip cache mount
+
+Problem: every requirements.txt change forced a full reinstall of all
+dependencies from scratch (including large packages like torch and
+chromadb), since Docker invalidates the whole layer on any change to that
+file and pip had no memory of previous downloads.
+Fix: changed the Dockerfile's pip install to use a BuildKit cache
+mount (--mount=type=cache,target=/root/.cache/pip), so downloaded
+packages persist across builds even when the layer itself is invalidated.
+Also: learned to only use docker compose up --build when
+requirements.txt or the Dockerfile change — plain Python code edits are
+picked up live via the mounted volume + uvicorn --reload, no rebuild needed.

@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import health_routes
+from app.api import auth_routes, health_routes
 
 app = FastAPI(title="InCite API")
 
@@ -15,6 +15,7 @@ app.add_middleware(
 )
 
 app.include_router(health_routes.router)
+app.include_router(auth_routes.router)
 
 # More routers get added here as they're built:
 # app.include_router(auth_routes.router)
