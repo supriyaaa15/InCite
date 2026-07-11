@@ -40,4 +40,14 @@ if that ever changes, since retrieval and generation are separate concerns.
 
 ---
 
-<!-- Add new entries below as each milestone is reached. -->
+## [Day 3-4] Fixed-size chunking with overlap
+Decision: word-count-based chunks (CHUNK_SIZE=500, CHUNK_OVERLAP=50).
+Why: simple to implement and reason about; overlap preserves context
+across chunk boundaries.
+Observed limitation: pages with leftover text just over CHUNK_SIZE
+produce a small trailing chunk that's mostly duplicate content (e.g. a
+501-word page yields chunk 0 with 500 words, chunk 1 with ~51 words,
+50 of which repeat chunk 0's tail). Phase 2: merge undersized trailing
+chunks into the previous chunk instead of keeping them separate.
+
+
