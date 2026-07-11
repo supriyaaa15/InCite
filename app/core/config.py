@@ -31,7 +31,7 @@ class Settings(BaseSettings):
 
     # LLM
     GOOGLE_API_KEY: str 
-    LLM_MODEL: str = "gemini-2.0-flash"
+    LLM_MODEL: str = "gemini-3-flash-preview"
 
     # Storage
     UPLOAD_DIR: str = "./uploads"

@@ -50,4 +50,40 @@ produce a small trailing chunk that's mostly duplicate content (e.g. a
 50 of which repeat chunk 0's tail). Phase 2: merge undersized trailing
 chunks into the previous chunk instead of keeping them separate.
 
+## [Day 5-6] Manual RAG pipeline validated end-to-end
+
+Decision: built the full pipeline (embed -> store in Chroma -> retrieve ->
+generate) as a standalone script (scripts/test_rag.py) before touching FastAPI.
+Why: confirms retrieval quality and generation correctness in isolation,
+with nothing else to blame if something looks wrong later inside the API.
+Result: tested against "Mastering Bitcoin" PDF, question "What is a Hash
+Time Lock Contract?" — top 5 retrieved chunks were all genuinely on-topic
+(pages 184, 351, 187, 358, 188, similarity 0.52 down to 0.46, sensible
+descending order). Generated answer correctly described both HTLC clauses
+(redemption via secret+hash, refund via timelock), named the actual opcode
+(CHECKLOCKTIMEVERIFY) and script structure — traceable to the retrieved
+chunks, not generic model knowledge. Confirms chunking + embeddings +
+retrieval + grounded generation all work correctly together.
+
+## [Day 5-6] google-generativeai -> google-genai SDK migration
+
+Decision: switched from google-generativeai (import as
+google.generativeai) to google-genai (import as from google import genai), using client.models.generate_content().
+Why: google-generativeai is Google's legacy SDK, deprecated November
+30, 2025. google-genai is the current, actively maintained SDK. It also
+exposes a newer stateful client.interactions.create() API for multi-turn/
+agentic use — not used here since this script only needs single-turn,
+stateless calls (no conversation history to manage yet).
+Also changed: default LLM_MODEL from gemini-2.0-flash (deprecated
+March 2026) to gemini-2.5-flash.
+
+## [Day 5-6] Observed: LLM call latency
+
+Observation: the Gemini API call itself took ~11.6s for a single answer,
+noticeably slower than the retrieval step (112ms). Not fixed now — noted for
+later. Once query_logs (Day 17) is storing response_time_ms per request,
+this becomes something to track systematically rather than eyeball once.
+Possible causes to investigate later: context size (5 chunks in the prompt),
+model choice (flash vs a faster/lighter variant), network latency to the API.
+
 
