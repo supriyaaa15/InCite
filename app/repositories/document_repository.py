@@ -22,6 +22,12 @@ def get_by_id(db: Session, document_id: uuid.UUID) -> Document | None:
     return db.query(Document).filter(Document.id == document_id).first()
 
 
+def get_by_ids(db: Session, document_ids: list[uuid.UUID]) -> list[Document]:
+    """Bulk lookup — used when building citations, so we do one query for
+    all documents referenced in a retrieval result, not one query per chunk."""
+    return db.query(Document).filter(Document.id.in_(document_ids)).all()
+
+
 def list_by_collection(db: Session, collection_id: uuid.UUID) -> list[Document]:
     return db.query(Document).filter(Document.collection_id == collection_id).all()
 

@@ -170,3 +170,112 @@ until status flips to ready or failed.
 Known gap (Phase 2): deleting a document removes it from Postgres but
 does not yet remove the corresponding vectors from Chroma — orphaned
 vectors accumulate until this is addressed.
+
+
+## [Day 12-13, revisited] Extracted retrieval_service.py from chat_service.py
+
+**Problem:** the original architecture plan called for retrieval and chat
+orchestration to be separate services, but the initial chat implementation
+put retrieval logic (embedding the query, calling Chroma, building
+citations) as private functions directly inside `chat_service.py` — drift
+from the plan.
+
+**Why it mattered:** a formal Phase 2-4 roadmap was defined (confidence
+scoring, retrieval transparency, follow-up suggestions, cross-document
+comparison, document intelligence reports, OCR, hybrid search, reranking).
+Hybrid Search and Reranking are both changes to *how retrieval works* —
+with retrieval logic embedded inside `chat_service.py`, those features
+would mean editing conversation-orchestration code to change retrieval
+behavior, coupling two concerns that should be independent.
+
+**Fix:** extracted `retrieve()` and `build_citations()` into
+`services/retrieval_service.py`. `chat_service.py` now only orchestrates
+(sessions, messages, calling retrieval, calling generation, logging) —
+it has no knowledge of how retrieval actually works internally. Hybrid
+search / reranking later only touch `retrieval_service.py`.
+
+**Deliberately NOT done now:** did not pre-add database columns for
+Phase 3's "Document Intelligence Report" (reading_level, topics,
+ocr_status, etc.) — that's speculative schema before the logic exists to
+populate it. Alembic migrations are already fast and low-risk, so the
+extensibility there is in having clean tooling, not pre-built empty
+columns. See `docs/architecture.md` "Extensibility" section for the full
+mapping of each planned phase to where it will plug in.
+
+## [Day 13, planning] Days 28-29 feature swapped: Compare Documents -> Confidence-aware RAG + Retrieval Transparency
+
+Decision: replaced the original Days 28-29 stretch feature (Compare
+Documents) with Confidence-aware RAG + Retrieval Transparency (both from
+the Phase 2 roadmap).
+Why: both are backend-cheap — similarity scores and retrieved-chunk
+detail already exist in every chat response as of Day 12-13. They reuse
+the existing chat UI (Day 22) rather than needing a new screen. They're
+also a better differentiator: "chat with your PDF, with citations" is
+common in RAG tutorials; a system that visibly tells you when it isn't
+confident, and shows its retrieval reasoning, is a less common design
+choice and a stronger technical talking point.
+Compare Documents and the rest of Phase 3/4 (cross-document
+comparison, document intelligence reports, OCR, hybrid search, reranking)
+remain explicitly out of scope for the 30-day placement deadline — tracked
+as post-placement future work, not abandoned scope creep.
+
+## [Day 13, revisited] Reasoning-capable prompt, structured reasoning field, trimmed excerpts
+
+Problem 1 — prompt was too literal: the original prompt ("answer using
+ONLY the context, if it doesn't contain the answer say so") caused the
+model to refuse questions like "why can't arrays contain different data
+types?" even when the context clearly supported an inferred answer (arrays
+store one type -> therefore can't hold different types). It was matching
+for an exact sentence instead of reasoning over what was stated.
+Fix: rewrote the prompt to explicitly allow reasoning and synthesis
+across the retrieved context, while still prohibiting facts not supported
+by it. Still fully grounded — just no longer requires a literal sentence
+match.
+
+Problem 2 — no visibility into why an answer was generated: citations
+showed sources, but nothing summarized which pages actually drove the
+answer.
+Fix: added a reasoning field to ChatResponse. Generated via
+structured JSON output from the LLM (response_mime_type: application/json
+
+
+response_schema with answer and reasoning keys) — confirmed this is
+supported by the current google-genai SDK before implementing. Structured
+output isn't 100% reliable from any LLM, so there's a deterministic
+fallback: if JSON parsing fails, the raw text becomes the answer and
+reasoning is built from citation metadata directly (grouping pages by
+document) rather than trusting the model's formatting. Reasoning is
+dependable even when the model's compliance isn't.
+
+
+Problem 3 — citations shipped full chunk text (800+ chars) to the API:
+fine for debugging, unnecessarily large and unpolished for real use.
+Fix: retrieval_service.build_citations() still returns full
+chunk_text internally (needed to build the LLM prompt). A new
+to_public() function trims it to a ~180-character excerpt, cut at a word
+boundary, for anything that leaves the server — both the API response and
+what gets persisted in Message.citations. Full chunk content remains
+recoverable from the chunks table (via document_id/page_number) if ever
+needed later — nothing is actually lost, just not shipped by default.
+
+## [Day 13, revisited] Bug: orphaned function body during a file edit
+
+Problem: AttributeError: module 'retrieval_service' has no attribute 'build_citations' — but only at request time, not at container startup,
+which made it confusing initially.
+Root cause: a prior edit inserted the new _excerpt()/to_public()
+functions but accidentally deleted the line def build_citations(...):
+itself, leaving its docstring and body as dead, unreachable code hanging
+off the end of to_public(). Python treated this as a syntactically valid
+(but useless) string literal followed by orphaned statements — no import-
+time error, since there was no syntax error, just a missing function
+definition.
+Why it didn't fail at startup: Python doesn't check that every
+function "looks complete" — it only errors when something tries to call a
+name that doesn't exist. build_citations simply didn't exist as an
+attribute on the module until something tried to call it mid-request.
+Fix: restored the missing def build_citations(db, retrieved): line
+so its body was reattached to a real function signature.
+Lesson: after any edit that reorganizes multiple functions in one
+file, verify with grep -n "^def " (or equivalent) that every expected
+function name is actually present as a definition — not just "the file
+compiles," since orphaned code like this doesn't cause a compile error.

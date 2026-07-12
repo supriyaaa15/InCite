@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import auth_routes,collection_routes, document_routes, health_routes
+from app.api import auth_routes, chat_routes, collection_routes, document_routes, health_routes
 
 app = FastAPI(title="InCite API")
 
@@ -18,6 +18,7 @@ app.include_router(health_routes.router)
 app.include_router(auth_routes.router)
 app.include_router(collection_routes.router)
 app.include_router(document_routes.router)
+app.include_router(chat_routes.router)
 
 # More routers get added here as they're built:
-# app.include_router(chat_routes.router)
+
