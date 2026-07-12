@@ -26,7 +26,8 @@ from google import genai
 from sentence_transformers import SentenceTransformer
 
 from app.core.config import settings
-from test_ingestion import chunk_text, load_pages  # same scripts/ folder, reuse Day 3-4 logic
+from app.utils.pdf_processing import chunk_text, load_pages
+# from test_ingestion import chunk_text, load_pages  # same scripts/ folder, reuse Day 3-4 logic
 
 COLLECTION_NAME = "test_collection"
 

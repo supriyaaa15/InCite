@@ -121,3 +121,52 @@ packages persist across builds even when the layer itself is invalidated.
 Also: learned to only use docker compose up --build when
 requirements.txt or the Dockerfile change — plain Python code edits are
 picked up live via the mounted volume + uvicorn --reload, no rebuild needed.
+
+## [Day 9-11] Collections + document upload working end-to-end
+
+Decision: promoted the Day 3-4/5-6 script logic (chunking, embedding)
+into real app code — app/utils/pdf_processing.py is now the single source
+of truth, imported by both ingestion_service.py (production) and the test
+scripts (manual sanity checks). No more duplicated logic between "test"
+and "real" code paths.
+Result: verified via Swagger — created a collection, uploaded a 5-page
+PDF, response returned immediately with status="processing", polled
+GET /documents/{id} until it flipped to status="ready" with page_count=5.
+Confirmed directly in Postgres (SELECT against chunks table) that all 5
+chunks were stored with correct page_number/chunk_index and real extracted
+content — not just that the API reported success.
+
+## [Day 9-11] One Chroma collection per InCite collection
+
+Decision: each Collection gets its own Chroma collection, named
+collection_{collection_id}, rather than one shared Chroma collection
+for the whole app.
+Why: this is what actually enforces multi-tenant isolation at the
+storage level. A chat inside "Resume" physically cannot retrieve chunks
+from "College Notes" — they live in different Chroma collections, not
+just filtered apart after a shared query. Filtering after the fact is one
+missed WHERE clause away from a data leak between users; separate storage
+isn't.
+
+## [Day 9-11] Ownership checks return the same 404 either way
+
+Decision: get_owned_collection() (and the equivalent document check)
+raises the same "not found" error whether a collection/document doesn't
+exist at all, or exists but belongs to a different user.
+Why: distinguishing "doesn't exist" from "exists but isn't yours"
+would let a user probe IDs to discover what other users have — same
+reasoning as the login error from Day 7-8.
+
+## [Day 9-11] Upload returns immediately; ingestion runs as a background task
+
+Decision: POST /collections/{id}/documents saves the file and creates
+a Document row (status=processing) synchronously, then hands off chunking/
+embedding/storage to a FastAPI BackgroundTask that runs after the response
+is already sent.
+Why: chunking + embedding a large PDF can take real time (tens of
+seconds) — making the client wait for all of that inside one HTTP request
+is bad UX and risks timeouts. The frontend instead polls GET /documents/{id}
+until status flips to ready or failed.
+Known gap (Phase 2): deleting a document removes it from Postgres but
+does not yet remove the corresponding vectors from Chroma — orphaned
+vectors accumulate until this is addressed.
