@@ -153,12 +153,128 @@ a:focus-visible {
   margin-bottom: 16px;
 }
 
-/* App shell (placeholder until Day 20) */
-.app-shell {
+/* Layout chrome — shared by every authenticated screen */
+.layout {
   min-height: 100%;
   display: flex;
-  align-items: center;
-  justify-content: center;
   flex-direction: column;
-  gap: 12px;
+}
+
+.layout-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 32px;
+  border-bottom: 1px solid var(--line);
+  background: var(--paper-raised);
+}
+
+.layout-brand {
+  font-family: var(--font-display);
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.layout-header-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.layout-user {
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+}
+
+.layout-main {
+  flex: 1;
+  max-width: 960px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 32px;
+}
+
+/* Shared page patterns */
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 24px;
+}
+
+.muted {
+  color: var(--ink-soft);
+}
+
+.muted-small {
+  color: var(--ink-soft);
+  font-size: 0.8rem;
+}
+
+.btn-compact {
+  width: auto;
+  padding: 8px 16px;
+  font-size: 0.85rem;
+  margin-top: 0;
+}
+
+.inline-form {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin-bottom: 24px;
+  padding: 16px;
+  background: var(--paper-raised);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.inline-form input {
+  flex: 1;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-family: var(--font-body);
+  font-size: 0.95rem;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+.inline-form input:focus {
+  border-color: var(--citation);
+}
+
+.inline-form .error-banner {
+  width: 100%;
+}
+
+/* Collections grid */
+.collection-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 16px;
+}
+
+.collection-card {
+  text-align: left;
+  background: var(--paper-raised);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 20px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-family: var(--font-body);
+}
+
+.collection-card:hover {
+  border-color: var(--citation);
+}
+
+.collection-card h3 {
+  font-size: 1.05rem;
+  font-family: var(--font-display);
 }

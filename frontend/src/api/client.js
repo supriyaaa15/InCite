@@ -31,4 +31,9 @@ export const api = {
   login: (email, password) =>
     request("/auth/login", { method: "POST", body: { email, password } }),
   me: (token) => request("/auth/me", { token }),
+
+  listCollections: (token) => request("/collections", { token }),
+  createCollection: (token, name) =>
+    request("/collections", { method: "POST", body: { name }, token }),
+  getCollection: (token, collectionId) => request(`/collections/${collectionId}`, { token }),
 };

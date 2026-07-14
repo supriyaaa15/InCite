@@ -1,25 +1,14 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import LoginPage from "./pages/LoginPage";
+import CollectionsPage from "./pages/CollectionsPage";
+import CollectionDetailPage from "./pages/CollectionDetailPage";
 
 function ProtectedRoute({ children }) {
   const { token, loading } = useAuth();
   if (loading) return null; // avoid a flash-redirect while we're still checking the token
   if (!token) return <Navigate to="/login" replace />;
   return children;
-}
-
-function HomePlaceholder() {
-  // Stands in until Day 20 builds the real Collections page.
-  const { user, logout } = useAuth();
-  return (
-    <div className="app-shell">
-      <h2>Logged in as {user?.email}</h2>
-      <button className="btn-link" onClick={logout}>
-        Log out
-      </button>
-    </div>
-  );
 }
 
 function AppRoutes() {
@@ -30,7 +19,15 @@ function AppRoutes() {
         path="/"
         element={
           <ProtectedRoute>
-            <HomePlaceholder />
+            <CollectionsPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/collections/:collectionId"
+        element={
+          <ProtectedRoute>
+            <CollectionDetailPage />
           </ProtectedRoute>
         }
       />
