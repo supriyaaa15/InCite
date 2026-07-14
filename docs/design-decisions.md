@@ -392,3 +392,102 @@ clean, the problem often isn't in the app at all — it's in the host
 platform's networking layer connecting to the containers. Worth checking
 container logs first (rules out app bugs) but not stopping there if logs
 show nothing wrong.
+
+## [Day 20] Collections page: shared Layout component introduced
+
+Decision: built components/Layout.jsx (header with brand + user email +
+logout) now, wrapping CollectionsPage, rather than putting header markup
+directly in each page.
+Why: every remaining screen (document upload, chat, history) needed
+the same chrome. Same principle as the backend's layered architecture —
+one place owns "what does every authenticated page look like," so adding
+a 6th screen later doesn't mean copy-pasting header JSX again.
+Also: collection cards navigate via onClick + useNavigate rather than
+plain <a> tags, since this is an SPA — a real page navigation would
+trigger a full reload and lose the in-memory auth state unnecessarily.
+
+[Day 21] Multipart upload required extending the API client's request()
+
+Problem: the existing request() helper always set
+Content-Type: application/json — fine for every prior endpoint, but wrong
+for file upload, where the browser must set its own Content-Type (with
+the multipart boundary) automatically.
+Fix: request() now accepts an optional formData param; when present,
+it's passed directly as the fetch body with no manual headers set,
+instead of JSON.stringify-ing a body object.
+
+## [Day 21] Polling design: per-document intervals, refresh-resilient, cleaned up on unmount
+
+Decision: pollIntervals (a useRef) tracks one setInterval per
+document id being polled, not a single global poller.
+Why: supports uploading multiple files without their polling
+interfering with each other, and each poll stops itself the moment a
+document leaves "processing" status — no wasted requests once there's
+nothing left to wait for.
+Also handled: resuming polling for any document still "processing"
+on page load (so a refresh mid-ingestion doesn't leave the UI frozen on
+a stale status), and clearing every active interval in the useEffect
+cleanup function (prevents state updates firing on an unmounted
+component, and the memory leak that would otherwise cause).
+
+## [Day 22] Chat UI: optimistic messages with rollback on failure
+
+Decision: the user's message appears in the message list immediately
+on submit, before the API call resolves — not after.
+Why: the LLM round trip is the slowest part of this app by far
+(observed 4-28s in Day 17's query_logs data); waiting for it before
+showing what the user just typed would make the UI feel unresponsive.
+Safety net: if the request fails, the optimistic message is rolled
+back (removed from state) rather than left in place looking like it was
+successfully sent and silently unanswered.
+Also: reasoning is rendered as a distinct, understated line (small
+italic) below the answer, separate from the citation chips — wasn't
+strictly required by the Day 22 scope, but the data was already available
+from the API (built Day 12-13), so surfacing it cost nothing and previews
+the Retrieval Transparency feature planned for Days 28-29.
+
+## [Day 23] Backend gap found while building history: ChatSessionResponse was missing collection_id
+
+Problem: GET /sessions returns every session across ALL of a user's
+collections (by design — chat_repository.list_sessions_by_user has no
+collection filter). The frontend needs to show only "this collection's"
+history in the chat sidebar, which requires filtering client-side by
+collection_id — but ChatSessionResponse didn't expose that field at all.
+Fix: added collection_id to ChatSessionResponse. No migration needed
+— the data already existed on the ChatSession model, it just wasn't
+being serialized in the response.
+Known, deliberate gap: resumed conversations show citations but not
+reasoning, because reasoning is only ever returned live at generation
+time — it's never persisted to the messages table (only content and
+citations are). Fixing this would need a new column + migration; not
+worth it for a field that's supplementary context, not the answer itself.
+Also: "new chat" is just local state reset (sessionId -> null,
+messages -> []) — no API call needed, since a new session isn't actually
+created server-side until the first message is sent to it.
+
+## [Day 24] Bug fix: chat wasn't history-aware, answered off-topic on follow-ups
+
+Problem: found via actual testing (Day 22-23) — asking "why is it used"
+as a follow-up to "what is arrays" returned information about arrays,
+structures, AND classes, instead of staying focused on arrays.
+Root cause: _generate_answer() never received any prior conversation
+turns — only the current question and whatever got retrieved for it
+alone. With no history, the model had no way to resolve "it" to "arrays"
+specifically, so a vague follow-up query retrieved (and then described)
+everything broadly related.
+Fix: send_message() now fetches prior messages via
+chat_repository.list_messages_by_session() BEFORE saving the current
+user message — guaranteeing history never includes the question being
+answered. The prompt gained a "Conversation so far" block (capped at the
+last ~3 exchanges, bounding prompt size) plus explicit instructions to
+resolve pronouns/references against that history and to focus only on
+the concept actually being asked about, not list every retrieved concept.
+Verified: same two-question sequence re-tested — second answer
+correctly stayed on-topic (multi-dimensional arrays specifically),
+reasoning cited one relevant page instead of several unrelated ones.
+Observation carried forward to Days 28-29: this test also showed
+citations with very weak/negative scores (0.08 down to -0.01) still
+displayed alongside a correctly-focused answer — confirms citation
+filtering needs to happen at the display layer, not by changing how
+generation already works (generation was already correctly ignoring the
+weak matches; the UI just wasn't).

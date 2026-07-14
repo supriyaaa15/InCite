@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
+import ReactMarkdown from "react-markdown";
 import { api } from "../api/client";
 import { useAuth } from "../context/AuthContext";
 import Layout from "../components/Layout";
@@ -35,6 +36,8 @@ export default function ChatPage() {
   }, [messages]);
 
   async function loadSession(session) {
+    if (sending) return; // switching sessions mid-request would let the
+    // pending response land in the wrong conversation once it resolves
     setError(null);
     setSessionId(session.id);
     try {
@@ -49,6 +52,7 @@ export default function ChatPage() {
   }
 
   function startNewChat() {
+    if (sending) return; // same reasoning as loadSession above
     setSessionId(null);
     setMessages([]);
     setError(null);
@@ -102,7 +106,11 @@ export default function ChatPage() {
 
       <div className="chat-layout">
         <aside className="chat-sidebar">
-          <button className="btn-secondary btn-compact chat-new-btn" onClick={startNewChat}>
+          <button
+            className="btn-secondary btn-compact chat-new-btn"
+            onClick={startNewChat}
+            disabled={sending}
+          >
             + New chat
           </button>
           {sessions.length === 0 && <p className="muted-small">No previous chats yet.</p>}
@@ -112,6 +120,7 @@ export default function ChatPage() {
                 key={s.id}
                 className={`session-item ${s.id === sessionId ? "session-item-active" : ""}`}
                 onClick={() => loadSession(s)}
+                disabled={sending}
               >
                 {s.title || "Untitled chat"}
               </button>
@@ -129,7 +138,13 @@ export default function ChatPage() {
 
             {messages.map((m, i) => (
               <div key={i} className={`chat-message chat-message-${m.role}`}>
-                <p className="chat-message-content">{m.content}</p>
+                {m.role === "assistant" ? (
+                  <div className="chat-message-content markdown-body">
+                    <ReactMarkdown>{m.content}</ReactMarkdown>
+                  </div>
+                ) : (
+                  <p className="chat-message-content">{m.content}</p>
+                )}
 
                 {m.reasoning && <p className="chat-reasoning">{m.reasoning}</p>}
 

@@ -80,16 +80,13 @@ def _fallback_reasoning(citations: list[dict]) -> str:
     return "This answer was derived from " + "; ".join(parts) + "."
 
 
-def _generate_answer(question: str, citations: list[dict]) -> tuple[str, str]:
+def _generate_answer(question: str, citations: list[dict], history: list[dict]) -> tuple[str, str]:
     """
-    Returns (answer, reasoning). The model is asked to reason and
-    synthesize across the retrieved context (not just locate an exact
-    matching sentence) while staying grounded in it. Structured output is
-    requested via with_structured_output() — if the model's output can't
-    be validated against AnswerWithReasoning, LangChain raises rather than
-    silently returning something malformed, so the except block below is
-    still the same safety net as Day 12-13: fall back to a plain call and
-    build reasoning deterministically from citation metadata.
+    Returns (answer, reasoning). history is prior turns in this session
+    ([{role, content}, ...], oldest first, current question NOT included)
+    — without it, a follow-up like "why is it used" has no way to resolve
+    what "it" refers to, and the model has no basis for narrowing down
+    which retrieved concept the user actually means.
     """
     if not citations:
         return (
@@ -97,15 +94,33 @@ def _generate_answer(question: str, citations: list[dict]) -> tuple[str, str]:
             _fallback_reasoning(citations),
         )
 
+    history_block = ""
+    if history:
+        recent = history[-6:]  # last ~3 exchanges — enough context, bounded prompt size
+        turns = "\n".join(f"{h['role'].capitalize()}: {h['content']}" for h in recent)
+        history_block = f"Conversation so far:\n{turns}\n\n"
+
     context = "\n\n---\n\n".join(
         f"[Page {c['page_number']}, {c['document_name']}]\n{c['chunk_text']}" for c in citations
     )
-    prompt = f"""You are answering a question using ONLY the context below. You may
-reason and synthesize across the provided context to form your answer —
-you are not limited to quoting an exact matching sentence. Do not
-introduce facts that are not supported by the context. If the context
-genuinely does not contain enough information to answer, say so honestly
-instead of guessing.
+    prompt = f"""{history_block}You are answering the user's latest question using ONLY the context below.
+
+If there is conversation history above, use it to understand what the
+current question is really asking — resolve pronouns and references like
+"it" or "that" to the specific concept actually being discussed, not just
+anything vaguely related.
+
+The retrieved context may contain multiple different concepts. Focus your
+answer ONLY on the concept the user is actually asking about. Do not list
+or describe unrelated concepts just because they happened to be
+retrieved — only bring one in if it's genuinely necessary to answer the
+question.
+
+You may reason and synthesize across the relevant parts of the context to
+form your answer — you are not limited to quoting an exact matching
+sentence. Do not introduce facts that are not supported by the context.
+If the context genuinely does not contain enough information to answer,
+say so honestly instead of guessing.
 
 Context:
 {context}
@@ -154,6 +169,12 @@ def send_message(
         title = message_text[:60]
         session = chat_repository.create_session(db, user_id, collection_id, title=title)
 
+    # Fetched BEFORE the current user message is saved below — this is
+    # prior turns only, current question excluded, which is exactly what
+    # _generate_answer needs to resolve follow-ups against.
+    prior_messages = chat_repository.list_messages_by_session(db, session.id)
+    history = [{"role": m.role.value, "content": m.content} for m in prior_messages]
+
     chat_repository.create_message(db, session.id, role=MessageRole.user, content=message_text)
 
     retrieval_start = time.time()
@@ -164,7 +185,7 @@ def send_message(
     citations = retrieval_service.build_citations(db, retrieved)
 
     llm_start = time.time()
-    answer, reasoning = _generate_answer(message_text, citations)
+    answer, reasoning = _generate_answer(message_text, citations, history)
     llm_time_ms = int((time.time() - llm_start) * 1000)
 
     # Excerpted version is what actually leaves the server — API response

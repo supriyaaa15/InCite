@@ -14,6 +14,18 @@ async function request(path, { method = "GET", body, formData, token } = {}) {
 
   const res = await fetch(`${API_BASE_URL}${path}`, { method, headers, body: requestBody });
 
+  if (res.status === 401) {
+    // Token expired or invalid — every screen calls request(), so this is
+    // handled once, here, rather than every page having to separately
+    // notice a 401 and know what to do about it. A hard redirect (not a
+    // router navigate) is deliberate: an expired session means starting
+    // fresh is correct, and this file has no access to React Router's
+    // navigate() since it's a plain module, not a component.
+    localStorage.removeItem("incite_token");
+    window.location.href = "/login";
+    throw new Error("Session expired. Please log in again.");
+  }
+
   if (!res.ok) {
     let detail = "Something went wrong. Please try again.";
     try {

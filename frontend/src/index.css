@@ -440,6 +440,40 @@ a:focus-visible {
   white-space: pre-wrap;
 }
 
+.markdown-body {
+  white-space: normal; /* Markdown handles its own line breaks — don't preserve raw whitespace */
+}
+
+.markdown-body p {
+  margin: 0 0 10px;
+}
+
+.markdown-body p:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  margin: 0 0 10px;
+  padding-left: 22px;
+}
+
+.markdown-body li {
+  margin-bottom: 4px;
+}
+
+.markdown-body strong {
+  font-weight: 600;
+}
+
+.markdown-body code {
+  font-family: var(--font-mono);
+  background: var(--citation-soft);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 0.88em;
+}
+
 .chat-reasoning {
   margin: 10px 0 0;
   font-size: 0.8rem;
