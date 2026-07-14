@@ -279,3 +279,116 @@ Lesson: after any edit that reorganizes multiple functions in one
 file, verify with grep -n "^def " (or equivalent) that every expected
 function name is actually present as a definition — not just "the file
 compiles," since orphaned code like this doesn't cause a compile error.
+
+## [Day 14-15] LangChain migration complete and verified
+
+Decision: migrated retrieval (retrieval_service.py) and generation
+(chat_service.py) to LangChain — langchain_chroma.Chroma wraps the same
+per-collection Chroma collections ingestion already writes to;
+ChatGoogleGenerativeAI.with_structured_output() replaces the hand-rolled
+response_mime_type + json.loads + try/except from Day 12-13.
+Result: verified via Swagger — same question style as Day 12-13,
+correct grounded answer, reasoning correctly named the source pages,
+citations correct. Confirms the migration didn't regress anything built
+in Days 12-13.
+Observation, not a bug: one retrieved chunk (page 4, a struct
+definition) came back with a negative similarity score (-0.2752) for an
+"what is array" query — correctly signaling irrelevance, but still
+returned because TOP_K always returns exactly k results regardless of
+whether they're all actually relevant. Concrete real example motivating
+Phase 2's Confidence-aware RAG feature — worth citing specifically rather
+than describing the feature hypothetically.
+
+## [Day 14-15] Dependency resolution saga: three real conflicts, in order
+
+Conflict 1 — langchain-chroma vs pinned chromadb==0.5.15: initial
+attempt used langchain-chroma>=0.1.4 (open range) which let pip try newer
+versions (up to 1.1.0) requiring chromadb>=1.0.9+ — incompatible with the
+old pin. Fix attempt: bumped chromadb client to >=1.3.5 — but this then
+required also bumping the Chroma server image in docker-compose.yml to
+match (client/server versions must be pinned together, always — a
+protocol-level requirement, not just a Python dependency one).
+Conflict 2 — client/server mismatch, in both directions: first hit
+when the client was upgraded to 1.3.5+ but the server docker-compose
+image was still on an old pin. Later hit AGAIN in the opposite direction
+when downgrading the client back to chromadb==0.5.15 (to satisfy
+langchain-chroma==0.1.4's actual requirement, confirmed via its published
+metadata: chromadb!=0.5.4,!=0.5.5,<0.6.0,>=0.4.0) without also reverting
+the server image, which had been bumped to 1.3.5. Symptom both times:
+ValueError: Could not connect to tenant default_tenant — Chroma's
+tenant/database protocol isn't compatible across major client/server
+version gaps. Fix: keep both pinned to the exact same version, always.
+Conflict 3 — langchain-google-genai vs langchain==0.3.4:
+langchain-google-genai's 4.x line requires langchain-core>=1.2.5,<2.0.0;
+langchain==0.3.4/langchain-community==0.3.2 pull in the old 0.3.x
+langchain-core line. These cannot coexist. Fix: downgraded to
+langchain-google-genai==2.1.5, confirmed compatible with langchain-core
+0.3.x via a real working combination reported by another developer.
+Also removed the explicit method="json_schema" argument from
+with_structured_output() since that parameter isn't confirmed to exist
+at this older version — let the library use its own default instead.
+Final pinned set: langchain==0.3.4, langchain-community==0.3.2,
+langchain-chroma==0.1.4, langchain-google-genai==2.1.5, chromadb==0.5.15,
+chroma server image chromadb/chroma:0.5.15 (matched to the client).
+Lesson for interviews: "how did you handle a broken dependency
+resolution" now has three genuinely different, specific answers instead
+of one — an open version range letting a resolver wander into
+incompatible territory, a protocol-level client/server pairing
+requirement that isn't visible in any single package's metadata, and a
+transitive shared-dependency conflict (langchain-core) between two
+otherwise-unrelated packages.
+
+## [Day 17] Query logging verified with real data
+
+Verification: query_logs was built early (Day 12-13, alongside chat)
+and assumed working since chat requests returned 200 OK with no errors —
+but never directly confirmed with real rows, unlike chunks which was
+checked directly after Day 9-11. Ran a SELECT against query_logs after
+the Day 14-15 LangChain migration to close that gap properly.
+Result: confirmed real rows — top_k=5 on every row (matches config),
+num_chunks=5 (every retrieval actually returned the expected count),
+correct llm_model, and response_time_ms populated.
+Observation: response_time_ms varied widely across requests using the
+identical model and top_k — from ~4.3s up to ~28.6s, nearly a 7x spread.
+Not investigated/fixed now, but this is exactly the kind of pattern
+query_logs exists to surface — worth revisiting if response time ever
+becomes a focus (e.g. candidate causes to check later: cold-start on the
+LLM API side, prompt/context size varying by question, network variance).
+
+## [Day 19] Frontend login/register working end-to-end
+
+Result: React (Vite) frontend built — login/register form, AuthContext
+holding JWT + user state (localStorage, re-validated via /auth/me on
+load), ProtectedRoute guard, design tokens (citation-themed palette:
+archival green accent, serif headings, mono for metadata — deliberate
+choice over generic SaaS blue, tied to the product's citation identity).
+Verified: register through the UI created a real user in Postgres, login
+issued a working JWT, refresh preserved the session, placeholder home
+screen correctly showed the authenticated user's email.
+
+## [Day 19] Debugging: ERR_CONNECTION_RESET was Docker Desktop's WSL2 port forwarding, not the app
+
+Problem: frontend showed "Failed to fetch"; a direct browser request to
+localhost:8000/health also failed with net::ERR_CONNECTION_RESET — even
+though docker compose logs showed the app, Postgres, and Chroma all
+starting cleanly with no errors.
+Why this was confusing: every previous connection issue in this
+project (crashed containers, missing imports, dependency conflicts) showed
+up clearly in docker compose logs. This one didn't — logs were clean,
+because the container itself was genuinely fine. The break was in
+Windows/Docker Desktop's WSL2 port-forwarding layer between localhost and
+the container's network namespace, which is invisible to container logs
+entirely.
+Diagnosis path: confirmed via DevTools Network tab that BOTH the
+actual fetch request AND its CORS preflight (OPTIONS) failed identically
+with a connection reset — ruling out a CORS policy issue (which would
+show a proper CORS error, not a reset) and pointing at something breaking
+the raw connection before any HTTP response could form.
+Fix: fully quit and restart Docker Desktop (not just docker compose restart — the app-level containers were never the problem, so restarting
+them changed nothing on earlier attempts).
+Lesson: when a connection fails at a level below HTTP (resets,
+refused, not a proper error response) and container logs are completely
+clean, the problem often isn't in the app at all — it's in the host
+platform's networking layer connecting to the containers. Worth checking
+container logs first (rules out app bugs) but not stopping there if logs
+show nothing wrong.

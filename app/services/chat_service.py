@@ -1,11 +1,11 @@
-import json
 import time
 import uuid
 
-from google import genai
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.llm import get_llm
 from app.models.chat import ChatSession, MessageRole
 from app.repositories import chat_repository, query_log_repository
 from app.services import collection_service, retrieval_service
@@ -24,6 +24,23 @@ class SessionCollectionMismatchError(Exception):
     collections mid-conversation."""
 
     pass
+
+
+class AnswerWithReasoning(BaseModel):
+    """
+    Schema for structured LLM output. Passed to with_structured_output()
+    (Day 14-15) — LangChain handles the JSON-mode request, schema
+    enforcement, and parsing that Day 12-13 did by hand with
+    response_mime_type + json.loads. This is the actual "what does
+    LangChain abstract" answer for this project: about 30 lines of manual
+    JSON handling collapsed into one method call.
+    """
+
+    answer: str = Field(description="The answer to the question, reasoned from the given context.")
+    reasoning: str = Field(
+        description="One short sentence naming which page(s) and document(s) "
+        "the answer draws from and what they cover."
+    )
 
 
 def get_owned_session(db: Session, user_id: uuid.UUID, session_id: uuid.UUID) -> ChatSession:
@@ -67,9 +84,12 @@ def _generate_answer(question: str, citations: list[dict]) -> tuple[str, str]:
     """
     Returns (answer, reasoning). The model is asked to reason and
     synthesize across the retrieved context (not just locate an exact
-    matching sentence) while staying grounded in it — and to name which
-    pages it drew from. Requested as structured JSON so reasoning is a
-    separate field, not something we'd have to parse out of prose.
+    matching sentence) while staying grounded in it. Structured output is
+    requested via with_structured_output() — if the model's output can't
+    be validated against AnswerWithReasoning, LangChain raises rather than
+    silently returning something malformed, so the except block below is
+    still the same safety net as Day 12-13: fall back to a plain call and
+    build reasoning deterministically from citation metadata.
     """
     if not citations:
         return (
@@ -90,47 +110,24 @@ instead of guessing.
 Context:
 {context}
 
-Question: {question}
-
-Respond with a JSON object with exactly two keys:
-- "answer": your answer to the question, reasoned from the context above
-- "reasoning": one short sentence naming which page(s) and document(s) the
-  answer draws from and what they cover
-
-Respond with ONLY the JSON object, no other text."""
-
-    client = genai.Client(api_key=settings.GOOGLE_API_KEY)
-    response = client.models.generate_content(
-        model=settings.LLM_MODEL,
-        contents=prompt,
-        config={
-            "response_mime_type": "application/json",
-            "response_schema": {
-                "type": "object",
-                "properties": {
-                    "answer": {"type": "string"},
-                    "reasoning": {"type": "string"},
-                },
-                "required": ["answer", "reasoning"],
-            },
-        },
-    )
+Question: {question}"""
 
     try:
-        parsed = json.loads(response.text)
-        answer = parsed.get("answer", "").strip()
-        reasoning = parsed.get("reasoning", "").strip()
+        structured_llm = get_llm().with_structured_output(AnswerWithReasoning)
+        result = structured_llm.invoke(prompt)
+        answer = result.answer.strip()
+        reasoning = result.reasoning.strip() or _fallback_reasoning(citations)
         if not answer:
             raise ValueError("model returned an empty answer")
-        if not reasoning:
-            reasoning = _fallback_reasoning(citations)
         return answer, reasoning
-    except (json.JSONDecodeError, ValueError, AttributeError):
-        # Model didn't return valid structured JSON — don't crash the
-        # request over it. Fall back to the raw text as the answer, and
-        # build reasoning deterministically from citation metadata rather
-        # than trusting the model's formatting.
-        return response.text.strip(), _fallback_reasoning(citations)
+    except Exception:
+        # Model didn't return valid structured output, or the call failed
+        # for some other reason — don't crash the request over it. Fall
+        # back to a plain unstructured call for the answer, and build
+        # reasoning deterministically from citation metadata rather than
+        # trusting the model's formatting.
+        response = get_llm().invoke(prompt)
+        return response.content.strip(), _fallback_reasoning(citations)
 
 
 def send_message(
@@ -178,10 +175,19 @@ def send_message(
         db, session.id, role=MessageRole.assistant, content=answer, citations=public_citations
     )
 
+    # Reconstructed using the same id scheme ingestion_service used when
+    # writing to Chroma (document_id_p{page}_c{chunk_index}) — retrieve()
+    # returns LangChain Documents now, not raw Chroma ids, so this is
+    # rebuilt from citation metadata instead of read directly off the
+    # query result.
+    retrieved_chunk_ids = [
+        f"{c['document_id']}_p{c['page_number']}_c{c['chunk_index']}" for c in citations
+    ]
+
     query_log_repository.create(
         db,
         message_id=assistant_message.id,
-        retrieved_chunk_ids=retrieved["ids"][0],
+        retrieved_chunk_ids=retrieved_chunk_ids,
         similarity_scores=[c["score"] for c in citations],
         top_k=settings.TOP_K,
         response_time_ms=retrieval_time_ms + llm_time_ms,
@@ -189,4 +195,3 @@ def send_message(
     )
 
     return session, answer, reasoning, public_citations
-
