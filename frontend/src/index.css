@@ -278,3 +278,48 @@ a:focus-visible {
   font-size: 1.05rem;
   font-family: var(--font-display);
 }
+
+/* Document list */
+.document-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.document-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  background: var(--paper-raised);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.document-filename {
+  flex: 1;
+  font-size: 0.95rem;
+}
+
+.status-badge {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  padding: 3px 10px;
+  border-radius: 999px;
+  text-transform: capitalize;
+}
+
+.status-processing {
+  background: #fdf3e0;
+  color: #8a6116;
+}
+
+.status-ready {
+  background: var(--citation-soft);
+  color: var(--citation);
+}
+
+.status-failed {
+  background: var(--error-soft);
+  color: var(--error);
+}
