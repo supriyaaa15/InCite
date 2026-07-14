@@ -9,6 +9,7 @@ export default function ChatPage() {
   const { token } = useAuth();
 
   const [collection, setCollection] = useState(null);
+  const [sessions, setSessions] = useState([]);
   const [messages, setMessages] = useState([]); // [{role, content, citations?, reasoning?}]
   const [sessionId, setSessionId] = useState(null);
   const [input, setInput] = useState("");
@@ -19,16 +20,46 @@ export default function ChatPage() {
 
   useEffect(() => {
     api.getCollection(token, collectionId).then(setCollection).catch(() => {});
+
+    // GET /sessions returns every session across all of the user's
+    // collections — filter down to just this collection's history.
+    api
+      .listSessions(token)
+      .then((all) => setSessions(all.filter((s) => s.collection_id === collectionId)))
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, collectionId]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  async function loadSession(session) {
+    setError(null);
+    setSessionId(session.id);
+    try {
+      const msgs = await api.getSessionMessages(token, session.id);
+      // Note: reasoning isn't persisted server-side (only returned live at
+      // generation time), so resumed history shows content + citations,
+      // but no reasoning line — expected, not a bug.
+      setMessages(msgs.map((m) => ({ role: m.role, content: m.content, citations: m.citations })));
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  function startNewChat() {
+    setSessionId(null);
+    setMessages([]);
+    setError(null);
+  }
+
   async function handleSubmit(e) {
     e.preventDefault();
     const text = input.trim();
     if (!text || sending) return;
+
+    const wasNewSession = sessionId === null;
 
     setError(null);
     setInput("");
@@ -44,6 +75,15 @@ export default function ChatPage() {
         ...prev,
         { role: "assistant", content: res.message, reasoning: res.reasoning, citations: res.citations },
       ]);
+
+      // First message of a brand-new session — add it to the sidebar
+      // immediately instead of waiting on a refetch.
+      if (wasNewSession) {
+        setSessions((prev) => [
+          { id: res.session_id, collection_id: collectionId, title: text.slice(0, 60), created_at: new Date().toISOString() },
+          ...prev,
+        ]);
+      }
     } catch (err) {
       setError(err.message);
       // Roll back the optimistic user message — it was never actually
@@ -60,55 +100,75 @@ export default function ChatPage() {
         <h2>{collection?.name ?? "Loading..."}</h2>
       </div>
 
-      <div className="chat-window">
-        <div className="chat-messages">
-          {messages.length === 0 && (
-            <p className="muted">
-              Ask a question about the documents in this collection to get started.
-            </p>
-          )}
-
-          {messages.map((m, i) => (
-            <div key={i} className={`chat-message chat-message-${m.role}`}>
-              <p className="chat-message-content">{m.content}</p>
-
-              {m.reasoning && <p className="chat-reasoning">{m.reasoning}</p>}
-
-              {m.citations && m.citations.length > 0 && (
-                <div className="citation-list">
-                  {m.citations.map((c, ci) => (
-                    <div key={ci} className="citation-chip">
-                      <div className="citation-chip-header">
-                        <span className="citation-doc">{c.document_name}</span>
-                        <span className="mono muted-small">p.{c.page_number}</span>
-                        <span className="mono muted-small">{c.score.toFixed(2)}</span>
-                      </div>
-                      <p className="citation-excerpt">{c.excerpt}</p>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          ))}
-
-          {sending && <p className="chat-thinking">Thinking...</p>}
-          <div ref={bottomRef} />
-        </div>
-
-        {error && <div className="error-banner">{error}</div>}
-
-        <form className="chat-input-row" onSubmit={handleSubmit}>
-          <input
-            type="text"
-            placeholder="Ask a question about this collection..."
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            disabled={sending}
-          />
-          <button className="btn-primary btn-compact" type="submit" disabled={sending || !input.trim()}>
-            Send
+      <div className="chat-layout">
+        <aside className="chat-sidebar">
+          <button className="btn-secondary btn-compact chat-new-btn" onClick={startNewChat}>
+            + New chat
           </button>
-        </form>
+          {sessions.length === 0 && <p className="muted-small">No previous chats yet.</p>}
+          <div className="session-list">
+            {sessions.map((s) => (
+              <button
+                key={s.id}
+                className={`session-item ${s.id === sessionId ? "session-item-active" : ""}`}
+                onClick={() => loadSession(s)}
+              >
+                {s.title || "Untitled chat"}
+              </button>
+            ))}
+          </div>
+        </aside>
+
+        <div className="chat-window">
+          <div className="chat-messages">
+            {messages.length === 0 && (
+              <p className="muted">
+                Ask a question about the documents in this collection to get started.
+              </p>
+            )}
+
+            {messages.map((m, i) => (
+              <div key={i} className={`chat-message chat-message-${m.role}`}>
+                <p className="chat-message-content">{m.content}</p>
+
+                {m.reasoning && <p className="chat-reasoning">{m.reasoning}</p>}
+
+                {m.citations && m.citations.length > 0 && (
+                  <div className="citation-list">
+                    {m.citations.map((c, ci) => (
+                      <div key={ci} className="citation-chip">
+                        <div className="citation-chip-header">
+                          <span className="citation-doc">{c.document_name}</span>
+                          <span className="mono muted-small">p.{c.page_number}</span>
+                          <span className="mono muted-small">{c.score.toFixed(2)}</span>
+                        </div>
+                        <p className="citation-excerpt">{c.excerpt}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+
+            {sending && <p className="chat-thinking">Thinking...</p>}
+            <div ref={bottomRef} />
+          </div>
+
+          {error && <div className="error-banner">{error}</div>}
+
+          <form className="chat-input-row" onSubmit={handleSubmit}>
+            <input
+              type="text"
+              placeholder="Ask a question about this collection..."
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              disabled={sending}
+            />
+            <button className="btn-primary btn-compact" type="submit" disabled={sending || !input.trim()}>
+              Send
+            </button>
+          </form>
+        </div>
       </div>
     </Layout>
   );
