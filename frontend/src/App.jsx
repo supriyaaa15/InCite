@@ -3,6 +3,7 @@ import { AuthProvider, useAuth } from "./context/AuthContext";
 import LoginPage from "./pages/LoginPage";
 import CollectionsPage from "./pages/CollectionsPage";
 import CollectionDetailPage from "./pages/CollectionDetailPage";
+import ChatPage from "./pages/ChatPage";
 
 function ProtectedRoute({ children }) {
   const { token, loading } = useAuth();
@@ -28,6 +29,14 @@ function AppRoutes() {
         element={
           <ProtectedRoute>
             <CollectionDetailPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/collections/:collectionId/chat"
+        element={
+          <ProtectedRoute>
+            <ChatPage />
           </ProtectedRoute>
         }
       />

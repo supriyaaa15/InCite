@@ -53,4 +53,13 @@ export const api = {
     });
   },
   getDocument: (token, documentId) => request(`/documents/${documentId}`, { token }),
+
+  sendMessage: (token, collectionId, message, sessionId) =>
+    request(`/collections/${collectionId}/chat`, {
+      method: "POST",
+      body: { message, session_id: sessionId },
+      token,
+    }),
+  listSessions: (token) => request("/sessions", { token }),
+  getSessionMessages: (token, sessionId) => request(`/sessions/${sessionId}/messages`, { token }),
 };

@@ -323,3 +323,136 @@ a:focus-visible {
   background: var(--error-soft);
   color: var(--error);
 }
+
+.page-header-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.btn-secondary {
+  width: auto;
+  padding: 8px 16px;
+  font-size: 0.85rem;
+  margin-top: 0;
+  background: var(--paper-raised);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-weight: 500;
+}
+
+.btn-secondary:hover {
+  border-color: var(--citation);
+}
+
+/* Chat */
+.chat-window {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 220px);
+  min-height: 400px;
+}
+
+.chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding-bottom: 16px;
+}
+
+.chat-message {
+  max-width: 640px;
+}
+
+.chat-message-user {
+  align-self: flex-end;
+  background: var(--citation-soft);
+  border-radius: 12px 12px 2px 12px;
+  padding: 10px 16px;
+}
+
+.chat-message-assistant {
+  align-self: flex-start;
+  background: var(--paper-raised);
+  border: 1px solid var(--line);
+  border-radius: 12px 12px 12px 2px;
+  padding: 14px 18px;
+}
+
+.chat-message-content {
+  margin: 0;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.chat-reasoning {
+  margin: 10px 0 0;
+  font-size: 0.8rem;
+  font-style: italic;
+  color: var(--ink-soft);
+}
+
+.chat-thinking {
+  color: var(--ink-soft);
+  font-size: 0.9rem;
+  font-style: italic;
+}
+
+.citation-list {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.citation-chip {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--citation);
+  border-radius: 6px;
+  padding: 8px 12px;
+}
+
+.citation-chip-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.citation-doc {
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--citation);
+}
+
+.citation-excerpt {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--ink-soft);
+  line-height: 1.4;
+}
+
+.chat-input-row {
+  display: flex;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.chat-input-row input {
+  flex: 1;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-family: var(--font-body);
+  font-size: 0.95rem;
+  background: var(--paper-raised);
+  color: var(--ink);
+}
+
+.chat-input-row input:focus {
+  border-color: var(--citation);
+}

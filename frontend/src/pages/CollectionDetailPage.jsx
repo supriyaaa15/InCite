@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 import { useAuth } from "../context/AuthContext";
 import Layout from "../components/Layout";
@@ -9,6 +9,7 @@ const POLL_INTERVAL_MS = 3000;
 export default function CollectionDetailPage() {
   const { collectionId } = useParams();
   const { token } = useAuth();
+  const navigate = useNavigate();
 
   const [collection, setCollection] = useState(null);
   const [documents, setDocuments] = useState([]);
@@ -92,13 +93,21 @@ export default function CollectionDetailPage() {
 
       <div className="page-header">
         <h2>{collection?.name ?? "Loading..."}</h2>
-        <button
-          className="btn-primary btn-compact"
-          onClick={() => fileInputRef.current.click()}
-          disabled={uploading}
-        >
-          {uploading ? "Uploading..." : "+ Upload PDF"}
-        </button>
+        <div className="page-header-actions">
+          <button
+            className="btn-secondary btn-compact"
+            onClick={() => navigate(`/collections/${collectionId}/chat`)}
+          >
+            Chat
+          </button>
+          <button
+            className="btn-primary btn-compact"
+            onClick={() => fileInputRef.current.click()}
+            disabled={uploading}
+          >
+            {uploading ? "Uploading..." : "+ Upload PDF"}
+          </button>
+        </div>
         <input
           ref={fileInputRef}
           type="file"
