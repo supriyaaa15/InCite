@@ -52,6 +52,8 @@ export const api = {
   createCollection: (token, name) =>
     request("/collections", { method: "POST", body: { name }, token }),
   getCollection: (token, collectionId) => request(`/collections/${collectionId}`, { token }),
+  deleteCollection: (token, collectionId) =>
+    request(`/collections/${collectionId}`, { method: "DELETE", token }),
 
   listDocuments: (token, collectionId) =>
     request(`/collections/${collectionId}/documents`, { token }),
@@ -65,6 +67,8 @@ export const api = {
     });
   },
   getDocument: (token, documentId) => request(`/documents/${documentId}`, { token }),
+  deleteDocument: (token, documentId) =>
+    request(`/documents/${documentId}`, { method: "DELETE", token }),
 
   sendMessage: (token, collectionId, message, sessionId) =>
     request(`/collections/${collectionId}/chat`, {
@@ -74,4 +78,6 @@ export const api = {
     }),
   listSessions: (token) => request("/sessions", { token }),
   getSessionMessages: (token, sessionId) => request(`/sessions/${sessionId}/messages`, { token }),
+  deleteSession: (token, sessionId) =>
+    request(`/sessions/${sessionId}`, { method: "DELETE", token }),
 };

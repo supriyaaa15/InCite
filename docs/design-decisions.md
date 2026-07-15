@@ -491,3 +491,125 @@ displayed alongside a correctly-focused answer — confirms citation
 filtering needs to happen at the display layer, not by changing how
 generation already works (generation was already correctly ignoring the
 weak matches; the UI just wasn't).
+
+## [Day 24] Bug-hunt pass: four bugs found and fixed
+
+Two found by deliberately re-reading the code with an adversarial eye
+(not just "does the happy path work"), two found by actually using the
+product and noticing something looked wrong.
+
+Bug 1 — expired/invalid tokens left the user stuck (found via review).
+Every page calls api/client.js's request(), but a 401 response just threw
+a generic error shown in whatever error-banner happened to be on screen —
+nothing logged the user out or returned them to /login. Fixed once, in
+request() itself: on 401, clear the stored token and hard-redirect to
+/login. Fixed at the one shared choke point rather than needing the same
+check copy-pasted into every page.
+
+Bug 2 — race condition switching chat sessions mid-request (found via
+review, confirmed real by testing). Nothing stopped clicking a
+different session (or "+ New chat") while a message was still in flight.
+The still-pending response would resolve after the switch and silently
+attach itself to whatever conversation was now being viewed, reverting
+sessionId unexpectedly. Fixed by guarding loadSession() and
+startNewChat() behind the same sending flag already used to disable
+the input, with a visible disabled state on the sidebar buttons.
+
+Bug 3 — LLM introduced LaTeX notation the frontend can't render (found
+via real testing on a math-heavy document). Asking about SVD returned
+"Σ\Sigma
+Σ" and "VTV^T
+VT" as literal text — even though the retrieved
+source chunk itself contained a plain, correctly-extracted unicode Σ
+character. The model was adding LaTeX formatting on its own initiative
+during generation, a common default habit for math-aware LLMs, and
+nothing in the frontend renders LaTeX. Fixed with a one-line prompt
+instruction: describe math in plain text/unicode, no LaTeX syntax.
+Cheaper and more consistent with the rest of the UI than adding a LaTeX
+rendering library for what's a narrow use case.
+
+Bug 4 — Markdown formatting showed as literal asterisks (found in the
+same test as Bug 3). The model naturally produces Markdown (bold,
+bullet lists) in longer answers, but chat-message-content was a plain
+
+<p> tag with no Markdown parsing — "**High Variance:**" rendered as
+literal asterisks instead of bold text. Fixed by adding react-markdown
+and rendering assistant messages through it (user-typed messages
+deliberately stay plain text — no reason to Markdown-parse what someone
+just typed, and it avoids surprising reformatting of a user's own
+literal asterisks/underscores).
+Pattern worth noting: Bugs 3 and 4 are opposite fixes for a similar
+symptom (model output containing special syntax the UI didn't handle) —
+one suppressed the syntax at the source (prompt instruction), the other
+rendered it properly at the destination (Markdown parser). Worth
+thinking about which lever to pull case by case: suppress at generation
+when the syntax adds no value to the reader (LaTeX with no renderer),
+render properly when it does (Markdown structure genuinely aids
+readability).
+
+## [Day 24] Found: LLM inconsistently follows the "admit when you don't know" instruction
+
+Observation: asked the identical question ("what is curse of
+dimensionality") in two different collections, both with weak retrieval
+(no score above 0.23, no retrieved chunk actually defining the term).
+Collection "new" correctly refused ("the provided context does not
+contain information about..."). Collection "new2" instead generated a
+full, plausible-sounding definition — almost certainly from the model's
+general training knowledge, not the retrieved context, despite the
+prompt explicitly instructing it to say so honestly when context is
+insufficient.
+Why this happens: LLMs sample probabilistically; instruction-
+following is a strong tendency, not a guarantee, even with explicit,
+well-written prompt instructions. The same weak-grounding scenario can
+go either way run to run. This is a structural property of how these
+models generate text, not something more/better prompt wording can fully
+eliminate.
+Decision: do not chase this with more prompt engineering. The real
+fix is deterministic and code-level, not linguistic — check retrieval
+scores BEFORE calling the LLM at all; if all scores fall below a
+threshold, return the "not enough information" message directly from
+Python, without ever asking the model to make that judgment call. This
+is precisely the planned Confidence-aware RAG feature (Days 28-29) —
+this observation is now the concrete, reproducible motivating evidence
+for it, not a hypothetical use case.
+Also observed: the two collections had different document sets
+("new" had 3 mixed-topic PDFs, "new2" appeared to have only
+viva_questions_v2.pdf), which affected which specific chunks got
+retrieved — but the core finding (inconsistent honesty about weak
+grounding) held regardless of exactly which chunks came back in each
+case.
+
+## [Day 25] Bug: deleting a collection crashed with a NOT NULL constraint violation
+
+Problem: DELETE /collections/{id} (first time ever actually exercised
+end-to-end — built Day 9-13, only verified by code review until now)
+threw sqlalchemy.exc.IntegrityError: null value in column "message_id"
+of relation "query_logs" violates not-null constraint.
+Root cause: two separate cascade mechanisms exist and look similar
+but aren't: the database-level ON DELETE CASCADE (set via
+ForeignKey(ondelete="CASCADE")) only fires if a raw DELETE reaches
+Postgres directly. But db.delete(some_object) in SQLAlchemy's ORM walks
+the Python object graph first — Collection -> ChatSession -> Message —
+and for any relationship without an explicit ORM-level cascade
+(cascade="all, delete-orphan"), its default behavior is to try to
+DISASSOCIATE the child (UPDATE ... SET foreign_key = NULL) rather than
+delete it. Message.query_log had no such cascade set, so the ORM tried
+to null out query_logs.message_id before deleting the message — which
+correctly failed, since that column is (deliberately) NOT NULL.
+Fix: added cascade="all, delete-orphan" to Message.query_log,
+matching the pattern already used correctly on every other parent-owns-
+children relationship in the schema.
+Verification step taken: grepped every relationship() definition
+across all models to confirm this was an isolated gap, not a systemic
+pattern — every other cascade (Collection.documents, Collection.
+chat_sessions, Document.chunks, User.collections, User.chat_sessions,
+ChatSession.messages) already had cascade="all, delete-orphan" set
+correctly. Worth doing this audit whenever one instance of a pattern-bug
+is found — checking whether it's isolated or systemic is cheap and
+prevents finding the same bug five more times later.
+Lesson: DB-level and ORM-level cascade are not the same guarantee.
+Setting ondelete="CASCADE" on a ForeignKey column is necessary but not
+sufficient when deletes go through db.delete() on a loaded object graph
+— the ORM-level relationship() cascade needs to be configured too, or
+SQLAlchemy's default "try to disassociate, not delete" behavior applies.
+

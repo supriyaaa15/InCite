@@ -43,4 +43,6 @@ class Message(TimestampedUUIDBase):
     citations: Mapped[list] = mapped_column(JSON, nullable=True)
 
     session: Mapped["ChatSession"] = relationship(back_populates="messages")
-    query_log: Mapped["QueryLog"] = relationship(back_populates="message", uselist=False)
+    query_log: Mapped["QueryLog"] = relationship(
+        back_populates="message", uselist=False, cascade="all, delete-orphan"
+    )

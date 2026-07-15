@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 
@@ -11,6 +11,10 @@ export default function LoginPage() {
 
   const { login, register } = useAuth();
   const navigate = useNavigate();
+
+  useEffect(() => {
+    document.title = "Log in · InCite";
+  }, []);
 
   async function handleSubmit(e) {
     e.preventDefault();

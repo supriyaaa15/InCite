@@ -16,6 +16,7 @@ export default function CollectionDetailPage() {
   const [error, setError] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState(null);
+  const [deletingId, setDeletingId] = useState(null);
 
   const fileInputRef = useRef(null);
   const pollIntervals = useRef({}); // documentId -> intervalId, so we can stop polling once a doc is done
@@ -40,6 +41,10 @@ export default function CollectionDetailPage() {
       }
     }, POLL_INTERVAL_MS);
   }
+
+  useEffect(() => {
+    document.title = collection ? `${collection.name} · InCite` : "InCite";
+  }, [collection]);
 
   useEffect(() => {
     api
@@ -87,6 +92,29 @@ export default function CollectionDetailPage() {
     }
   }
 
+  async function handleDeleteDocument(documentId, filename) {
+    const confirmed = window.confirm(`Delete "${filename}"? This can't be undone.`);
+    if (!confirmed) return;
+
+    // If this document was still being polled (mid-ingestion), stop that
+    // poll first — otherwise it'd keep hitting a document that no longer
+    // exists until the request itself starts failing.
+    if (pollIntervals.current[documentId]) {
+      clearInterval(pollIntervals.current[documentId]);
+      delete pollIntervals.current[documentId];
+    }
+
+    setDeletingId(documentId);
+    try {
+      await api.deleteDocument(token, documentId);
+      setDocuments((prev) => prev.filter((d) => d.id !== documentId));
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
   return (
     <Layout>
       {error && <div className="error-banner">{error}</div>}
@@ -131,6 +159,15 @@ export default function CollectionDetailPage() {
             {doc.status === "ready" && (
               <span className="mono muted-small">{doc.page_count} pages</span>
             )}
+            <button
+              className="btn-icon-delete"
+              onClick={() => handleDeleteDocument(doc.id, doc.filename)}
+              disabled={deletingId === doc.id}
+              title="Delete document"
+              aria-label={`Delete ${doc.filename}`}
+            >
+              {deletingId === doc.id ? "..." : "×"}
+            </button>
           </div>
         ))}
       </div>

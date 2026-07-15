@@ -274,9 +274,50 @@ a:focus-visible {
   border-color: var(--citation);
 }
 
+.collection-card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .collection-card h3 {
   font-size: 1.05rem;
   font-family: var(--font-display);
+}
+
+/* Icon delete buttons — used on collection cards, document rows, session items */
+.btn-icon-delete {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: none;
+  color: var(--ink-soft);
+  font-size: 1.1rem;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.btn-icon-delete:hover {
+  background: var(--error-soft);
+  color: var(--error);
+  border-color: var(--error);
+}
+
+.btn-icon-delete:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-icon-delete-sm {
+  width: 20px;
+  height: 20px;
+  font-size: 0.95rem;
 }
 
 /* Document list */
@@ -375,18 +416,30 @@ a:focus-visible {
 }
 
 .session-item {
-  text-align: left;
-  background: none;
-  border: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
   border-radius: 6px;
-  padding: 9px 10px;
+  padding: 9px 6px 9px 10px;
   font-size: 0.85rem;
   font-family: var(--font-body);
   color: var(--ink-soft);
   cursor: pointer;
+}
+
+.session-item-title {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.session-item .btn-icon-delete {
+  opacity: 0; /* only show the delete × on hover — reduces visual noise in the list */
+}
+
+.session-item:hover .btn-icon-delete {
+  opacity: 1;
 }
 
 .session-item:hover {

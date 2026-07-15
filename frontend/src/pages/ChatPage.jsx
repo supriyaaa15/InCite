@@ -20,6 +20,10 @@ export default function ChatPage() {
   const bottomRef = useRef(null);
 
   useEffect(() => {
+    document.title = collection ? `Chat · ${collection.name} · InCite` : "InCite";
+  }, [collection]);
+
+  useEffect(() => {
     api.getCollection(token, collectionId).then(setCollection).catch(() => {});
 
     // GET /sessions returns every session across all of the user's
@@ -56,6 +60,28 @@ export default function ChatPage() {
     setSessionId(null);
     setMessages([]);
     setError(null);
+  }
+
+  async function handleDeleteSession(e, id) {
+    e.stopPropagation(); // don't also trigger loadSession
+    if (sending) return;
+
+    const confirmed = window.confirm("Delete this chat? This can't be undone.");
+    if (!confirmed) return;
+
+    try {
+      await api.deleteSession(token, id);
+      setSessions((prev) => prev.filter((s) => s.id !== id));
+      // If the deleted session was the one currently open, fall back to a
+      // blank new-chat state rather than leaving a transcript on screen
+      // for a session that no longer exists.
+      if (id === sessionId) {
+        setSessionId(null);
+        setMessages([]);
+      }
+    } catch (err) {
+      setError(err.message);
+    }
   }
 
   async function handleSubmit(e) {
@@ -116,14 +142,25 @@ export default function ChatPage() {
           {sessions.length === 0 && <p className="muted-small">No previous chats yet.</p>}
           <div className="session-list">
             {sessions.map((s) => (
-              <button
+              <div
                 key={s.id}
                 className={`session-item ${s.id === sessionId ? "session-item-active" : ""}`}
                 onClick={() => loadSession(s)}
-                disabled={sending}
+                onKeyDown={(e) => e.key === "Enter" && loadSession(s)}
+                role="button"
+                tabIndex={0}
+                aria-disabled={sending}
               >
-                {s.title || "Untitled chat"}
-              </button>
+                <span className="session-item-title">{s.title || "Untitled chat"}</span>
+                <button
+                  className="btn-icon-delete btn-icon-delete-sm"
+                  onClick={(e) => handleDeleteSession(e, s.id)}
+                  title="Delete chat"
+                  aria-label={`Delete chat: ${s.title || "Untitled chat"}`}
+                >
+                  ×
+                </button>
+              </div>
             ))}
           </div>
         </aside>
