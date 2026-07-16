@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.core.config import settings
+from app.core.chroma_client import get_chroma_client
 from app.core.database import get_db
 
 router = APIRouter(prefix="/health", tags=["health"])
@@ -26,11 +26,16 @@ def health_db(db: Session = Depends(get_db)):
 
 @router.get("/chroma")
 def health_chroma():
-    """Can we actually reach Chroma."""
+    """
+    Can we actually reach Chroma. Embedded (PersistentClient) now, not a
+    separate server — this checks that the local persist path is
+    readable/writable, not network connectivity. Uses the same shared
+    client singleton as ingestion and retrieval, rather than constructing
+    its own — that was a pre-existing inconsistency worth fixing while
+    touching this file anyway.
+    """
     try:
-        import chromadb
-
-        client = chromadb.HttpClient(host=settings.CHROMA_HOST, port=settings.CHROMA_PORT)
+        client = get_chroma_client()
         client.heartbeat()
         return {"status": "ok", "chroma": "connected"}
     except Exception as e:

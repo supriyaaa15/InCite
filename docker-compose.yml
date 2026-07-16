@@ -16,14 +16,6 @@ services:
       timeout: 5s
       retries: 5
 
-  chroma:
-    image: chromadb/chroma:0.5.15
-    restart: unless-stopped
-    ports:
-      - "8001:8000"
-    volumes:
-      - chroma_data:/chroma/chroma
-
   app:
     build: .
     restart: unless-stopped
@@ -31,18 +23,16 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql://incite:incite@db:5432/incite
-      CHROMA_HOST: chroma
-      CHROMA_PORT: 8000
+      CHROMA_PERSIST_PATH: /app/chroma_data
     ports:
       - "8000:8000"
     volumes:
       - .:/app
       - ./uploads:/app/uploads
+      - chroma_data:/app/chroma_data
     depends_on:
       db:
         condition: service_healthy
-      chroma:
-        condition: service_started
 
 volumes:
   postgres_data:

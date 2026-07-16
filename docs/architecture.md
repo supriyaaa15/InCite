@@ -25,10 +25,13 @@ Request flow: **API routes** -> **services** (business logic) -> **repositories*
   from retrieved chunks.
 
 ## Deployment
+Single Render web service runs the FastAPI app, with Chroma embedded inside it (PersistentClient) rather than as a separate service — avoids Render's requirement that any service receiving private network traffic be on a paid tier. See design-decisions.md for the full reasoning and alternatives considered (paid private Chroma service, Qdrant Cloud, AWS).
+
 - Backend + Postgres: Render
 - Frontend: Vercel
 - Chosen over AWS EC2 for setup speed within a 30-day timeline — see
   design-decisions.md for the full reasoning.
+  Known trade-off: Chroma's embedded data isn't guaranteed to survive a redeploy unless the persist path is backed by a persistent disk. Accepted for this project — documents can be re-uploaded after a redeploy; not acceptable for a real production system with real users.
 
 ## Extensibility — where future phases plug in
 

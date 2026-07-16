@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+
 class Settings(BaseSettings):
     """
     Single source of truth for all configuration.
@@ -12,12 +13,12 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: str = "postgresql://incite:incite@localhost:5432/incite"
 
-    # Chroma
-    CHROMA_HOST: str = "localhost"
-    CHROMA_PORT: int = 8000
+    # Chroma — embedded (PersistentClient), not a separate server. Writes
+    # to a local directory instead of talking to a network service.
+    CHROMA_PERSIST_PATH: str = "./chroma_data"
 
     # Auth
-    JWT_SECRET: str 
+    JWT_SECRET: str  # required — no default, app won't start without it in .env
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_MINUTES: int = 1440
 
@@ -30,8 +31,8 @@ class Settings(BaseSettings):
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
 
     # LLM
-    GOOGLE_API_KEY: str 
-    LLM_MODEL: str = "gemini-3-flash-preview"
+    GOOGLE_API_KEY: str  # required — no default, app won't start without it in .env
+    LLM_MODEL: str = "gemini-2.5-flash"
 
     # Storage
     UPLOAD_DIR: str = "./uploads"
