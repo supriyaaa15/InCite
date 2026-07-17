@@ -12,9 +12,18 @@ bcrypt==4.0.1
 python-multipart==0.0.12
 python-dotenv==1.0.1
 chromadb==0.5.15
-sentence-transformers==3.2.0
 pdfplumber==0.11.4
 langchain==0.3.4
 langchain-community==0.3.2
 langchain-chroma==0.1.4
 langchain-google-genai==2.1.5
+google-genai>=1.3.0  # used directly by scripts/test_rag.py, not the deployed app
+
+# CPU-only torch — default PyPI wheels on Linux bundle full CUDA support
+# (unlike Windows/Mac, which get CPU-only by default). Render's free tier
+# has no GPU and only 512MB RAM; the CUDA-inclusive build alone was enough
+# to OOM the deploy before the app even started serving requests. This
+# also speeds up every future build, local and deployed.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.4.1+cpu
+sentence-transformers==3.2.0
