@@ -1,4 +1,7 @@
-const API_BASE_URL = "http://localhost:8000";
+// VITE_API_BASE_URL is set at build time (Vercel env var in production).
+// Falls back to localhost so local `npm run dev` keeps working with no
+// .env file needed.
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 
 async function request(path, { method = "GET", body, formData, token } = {}) {
   const headers = {};

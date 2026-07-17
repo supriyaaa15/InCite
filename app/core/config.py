@@ -37,5 +37,10 @@ class Settings(BaseSettings):
     # Storage
     UPLOAD_DIR: str = "./uploads"
 
+    # CORS — comma-separated list of allowed frontend origins. Defaults to
+    # local Vite dev server; set to the real deployed frontend URL in
+    # production (e.g. https://incite.vercel.app).
+    ALLOWED_ORIGINS: str = "http://localhost:5173"
+
 
 settings = Settings()
