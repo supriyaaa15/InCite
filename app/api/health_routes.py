@@ -8,12 +8,17 @@ from app.core.database import get_db
 router = APIRouter(prefix="/health", tags=["health"])
 
 
-@router.api_route("", methods=["GET", "HEAD"])
+@router.get("")
+@router.head("")
 def health():
+    """Is the app process alive at all. HEAD supported explicitly —
+    uptime monitors (UptimeRobot etc.) commonly default to HEAD requests
+    to save bandwidth, and FastAPI doesn't auto-add HEAD for a GET route."""
     return {"status": "ok"}
 
 
 @router.get("/db")
+@router.head("/db")
 def health_db(db: Session = Depends(get_db)):
     """Can we actually reach Postgres and run a query."""
     try:
@@ -24,6 +29,7 @@ def health_db(db: Session = Depends(get_db)):
 
 
 @router.get("/chroma")
+@router.head("/chroma")
 def health_chroma():
     """
     Can we actually reach Chroma. Embedded (PersistentClient) now, not a
