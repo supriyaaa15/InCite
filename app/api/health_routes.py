@@ -8,9 +8,8 @@ from app.core.database import get_db
 router = APIRouter(prefix="/health", tags=["health"])
 
 
-@router.get("")
+@router.api_route("", methods=["GET", "HEAD"])
 def health():
-    """Is the app process alive at all."""
     return {"status": "ok"}
 
 
