@@ -23,6 +23,7 @@ class ChatResponse(BaseModel):
     message: str
     reasoning: str
     citations: list[Citation]
+    confidence: str  # "none" | "low" | "high" — see chat_service.send_message
 
 
 class ChatSessionResponse(BaseModel):

@@ -80,20 +80,37 @@ def _fallback_reasoning(citations: list[dict]) -> str:
     return "This answer was derived from " + "; ".join(parts) + "."
 
 
+def _no_confidence_answer() -> tuple[str, str]:
+    """
+    Deterministic — no LLM call involved. Used whenever nothing survives
+    filter_citations(), i.e. every retrieved chunk was below
+    MIN_CITATION_SCORE. This is the fix for a real bug found during
+    testing (Day 24): asking the LLM to "be honest when unsure" isn't
+    reliable — the same weak-retrieval scenario answered correctly one
+    time and hallucinated the next. Removing the LLM from this decision
+    entirely, rather than asking it to make the right call, is what
+    actually fixes it.
+    """
+    return (
+        "I couldn't find enough information in the uploaded documents to "
+        "answer that. Try asking differently, or upload a document that "
+        "covers this topic.",
+        "No relevant content was found in this collection.",
+    )
+
+
 def _generate_answer(question: str, citations: list[dict], history: list[dict]) -> tuple[str, str]:
     """
-    Returns (answer, reasoning). history is prior turns in this session
-    ([{role, content}, ...], oldest first, current question NOT included)
-    — without it, a follow-up like "why is it used" has no way to resolve
-    what "it" refers to, and the model has no basis for narrowing down
-    which retrieved concept the user actually means.
+    Returns (answer, reasoning). citations here are already filtered
+    (filter_citations() has run in send_message before this is called) —
+    every chunk weak enough to be noise has already been removed, so
+    everything reaching the prompt is something worth answering from.
+    history is prior turns in this session ([{role, content}, ...],
+    oldest first, current question NOT included) — without it, a
+    follow-up like "why is it used" has no way to resolve what "it"
+    refers to, and the model has no basis for narrowing down which
+    retrieved concept the user actually means.
     """
-    if not citations:
-        return (
-            "I couldn't find anything relevant to that question in this collection.",
-            _fallback_reasoning(citations),
-        )
-
     history_block = ""
     if history:
         recent = history[-6:]  # last ~3 exchanges — enough context, bounded prompt size
@@ -121,6 +138,11 @@ form your answer — you are not limited to quoting an exact matching
 sentence. Do not introduce facts that are not supported by the context.
 If the context genuinely does not contain enough information to answer,
 say so honestly instead of guessing.
+
+Write any mathematical notation in plain, readable text or standard
+unicode symbols (e.g. "U, V transpose, and a diagonal matrix Σ") — do NOT
+use LaTeX syntax (no dollar signs, no backslash-commands like \\Sigma or
+\\sqrt). The person reading this cannot render LaTeX.
 
 Context:
 {context}
@@ -151,13 +173,18 @@ def send_message(
     collection_id: uuid.UUID,
     message_text: str,
     session_id: uuid.UUID | None,
-) -> tuple[ChatSession, str, str, list[dict]]:
+) -> tuple[ChatSession, str, str, list[dict], str]:
     """
     The full chat flow: verify ownership, get/create the session, retrieve
     relevant chunks, generate a grounded answer + reasoning, persist
     everything (both messages + a query log), return what the route needs.
     Retrieval itself is delegated to retrieval_service — this function only
     orchestrates the conversation around it.
+
+    Returns (session, answer, reasoning, public_citations, confidence).
+    confidence is "none" (nothing cleared the noise filter, LLM never
+    called), "low" (an answer was generated, but the best supporting
+    citation is still below LOW_CONFIDENCE_THRESHOLD), or "high".
     """
     collection_service.get_owned_collection(db, user_id, collection_id)
 
@@ -182,25 +209,34 @@ def send_message(
     retrieval_time_ms = int((time.time() - retrieval_start) * 1000)
 
     # Full chunk_text kept internal — only used to build the LLM prompt.
+    # Unfiltered — kept as-is for query_logs below, so debugging retrieval
+    # quality later sees everything that came back, not just what passed.
     citations = retrieval_service.build_citations(db, retrieved)
+    filtered_citations = retrieval_service.filter_citations(citations, settings.MIN_CITATION_SCORE)
 
     llm_start = time.time()
-    answer, reasoning = _generate_answer(message_text, citations, history)
+    if not filtered_citations:
+        answer, reasoning = _no_confidence_answer()
+        confidence = "none"
+    else:
+        answer, reasoning = _generate_answer(message_text, filtered_citations, history)
+        top_score = max(c["score"] for c in filtered_citations)
+        confidence = "low" if top_score < settings.LOW_CONFIDENCE_THRESHOLD else "high"
     llm_time_ms = int((time.time() - llm_start) * 1000)
 
     # Excerpted version is what actually leaves the server — API response
-    # and what gets persisted in Message.citations.
-    public_citations = retrieval_service.to_public(citations)
+    # and what gets persisted in Message.citations. Built from the
+    # filtered list — a citation too weak to inform the answer shouldn't
+    # be shown as if it did.
+    public_citations = retrieval_service.to_public(filtered_citations, message_text)
 
     assistant_message = chat_repository.create_message(
         db, session.id, role=MessageRole.assistant, content=answer, citations=public_citations
     )
 
-    # Reconstructed using the same id scheme ingestion_service used when
-    # writing to Chroma (document_id_p{page}_c{chunk_index}) — retrieve()
-    # returns LangChain Documents now, not raw Chroma ids, so this is
-    # rebuilt from citation metadata instead of read directly off the
-    # query result.
+    # Logged from the ORIGINAL unfiltered citations, deliberately — this
+    # table exists for debugging retrieval quality, so it should show
+    # everything that came back, not just what survived filtering.
     retrieved_chunk_ids = [
         f"{c['document_id']}_p{c['page_number']}_c{c['chunk_index']}" for c in citations
     ]
@@ -215,4 +251,4 @@ def send_message(
         llm_model=settings.LLM_MODEL,
     )
 
-    return session, answer, reasoning, public_citations
+    return session, answer, reasoning, public_citations, confidence

@@ -12,6 +12,7 @@ embedding weights (see core/embeddings.py's LangChain wrapper) — same
 data, same vectors, just queried through LangChain's interface now.
 """
 
+import re
 import uuid
 
 from langchain_chroma import Chroma
@@ -85,12 +86,64 @@ def build_citations(db: Session, retrieved: list[tuple[Document, float]]) -> lis
     return citations
 
 
-def _excerpt(text: str, max_chars: int = 180) -> str:
-    """Short, clean preview for anything leaving the server. Full chunk
-    content stays recoverable from Postgres (chunks table, via
-    document_id/page_number/chunk_index) if ever needed for debugging —
-    there's no need to ship the whole chunk in every API response."""
-    text = " ".join(text.split())  # normalize whitespace
+def filter_citations(citations: list[dict], min_score: float) -> list[dict]:
+    """
+    Removes citations below min_score — pure noise reduction. This runs
+    BEFORE generation, not just before display: a chunk too weak to show
+    the user is also too weak to hand the LLM as "context" — feeding it
+    in anyway is exactly what let a past query hallucinate an answer from
+    the model's general knowledge instead of admitting the documents
+    didn't cover it (see design-decisions.md, Day 24).
+    """
+    return [c for c in citations if c["score"] >= min_score]
+
+
+_STOPWORDS = {
+    "a", "an", "the", "is", "are", "was", "were", "in", "on", "at", "of",
+    "to", "for", "and", "or", "but", "what", "how", "why", "does", "do",
+    "can", "it", "this", "that", "with", "as", "be",
+}
+
+
+def _best_sentence(text: str, query: str, max_chars: int = 220) -> str:
+    """
+    Picks the sentence within a chunk most relevant to the query, instead
+    of blindly showing the first N characters. Relevance = word overlap
+    with the query (stopwords excluded) — deterministic, no extra LLM
+    call or embedding lookup needed, since the words that matter in a
+    short question are usually the meaningful ones already.
+    Falls back to simple truncation if sentence splitting doesn't help
+    (e.g. a chunk with no real sentence breaks).
+    """
+    text = " ".join(text.split())
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    sentences = [s.strip() for s in sentences if s.strip()]
+
+    if len(sentences) <= 1:
+        return _truncate(text, max_chars)
+
+    query_words = {w for w in re.findall(r"\w+", query.lower()) if w not in _STOPWORDS}
+    if not query_words:
+        return _truncate(text, max_chars)
+
+    best_sentence = None
+    best_overlap = -1
+    for sentence in sentences:
+        sentence_words = set(re.findall(r"\w+", sentence.lower()))
+        overlap = len(query_words & sentence_words)
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_sentence = sentence
+
+    if best_overlap <= 0:
+        # nothing meaningfully matched — a first-N-chars preview is more
+        # honest here than presenting an arbitrary sentence as "the" match
+        return _truncate(text, max_chars)
+
+    return _truncate(best_sentence, max_chars)
+
+
+def _truncate(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     truncated = text[:max_chars]
@@ -100,16 +153,16 @@ def _excerpt(text: str, max_chars: int = 180) -> str:
     return truncated + "..."
 
 
-def to_public(citations: list[dict]) -> list[dict]:
-    """Strips full chunk_text down to a short excerpt. Used for anything
-    that leaves the server — the API response and what gets stored in
-    Message.citations. build_citations()'s full chunk_text is only ever
-    used internally, to build the LLM prompt."""
+def to_public(citations: list[dict], query: str) -> list[dict]:
+    """Strips full chunk_text down to the most relevant sentence. Used
+    for anything that leaves the server — the API response and what gets
+    stored in Message.citations. build_citations()'s full chunk_text is
+    only ever used internally, to build the LLM prompt."""
     return [
         {
             "document_name": c["document_name"],
             "page_number": c["page_number"],
-            "excerpt": _excerpt(c["chunk_text"]),
+            "excerpt": _best_sentence(c["chunk_text"], query),
             "score": c["score"],
         }
         for c in citations

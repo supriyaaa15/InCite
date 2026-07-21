@@ -493,6 +493,25 @@ a:focus-visible {
   white-space: pre-wrap;
 }
 
+.confidence-badge {
+  display: inline-block;
+  font-size: 0.78rem;
+  font-weight: 500;
+  padding: 4px 10px;
+  border-radius: 999px;
+  margin-bottom: 10px;
+}
+
+.confidence-none {
+  background: var(--error-soft);
+  color: var(--error);
+}
+
+.confidence-low {
+  background: #fdf3e0;
+  color: #8a6116;
+}
+
 .markdown-body {
   white-space: normal; /* Markdown handles its own line breaks — don't preserve raw whitespace */
 }

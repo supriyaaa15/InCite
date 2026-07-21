@@ -22,7 +22,7 @@ def send_message(
     db: Session = Depends(get_db),
 ):
     try:
-        session, answer, reasoning, citations = chat_service.send_message(
+        session, answer, reasoning, citations, confidence = chat_service.send_message(
             db,
             user_id=current_user.id,
             collection_id=collection_id,
@@ -39,7 +39,13 @@ def send_message(
             detail="session_id belongs to a different collection",
         )
 
-    return ChatResponse(session_id=session.id, message=answer, reasoning=reasoning, citations=citations)
+    return ChatResponse(
+        session_id=session.id,
+        message=answer,
+        reasoning=reasoning,
+        citations=citations,
+        confidence=confidence,
+    )
 
 
 @router.get("/sessions", response_model=list[ChatSessionResponse])

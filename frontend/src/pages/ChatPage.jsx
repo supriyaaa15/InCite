@@ -103,7 +103,13 @@ export default function ChatPage() {
       setSessionId(res.session_id);
       setMessages((prev) => [
         ...prev,
-        { role: "assistant", content: res.message, reasoning: res.reasoning, citations: res.citations },
+        {
+          role: "assistant",
+          content: res.message,
+          reasoning: res.reasoning,
+          citations: res.citations,
+          confidence: res.confidence,
+        },
       ]);
 
       // First message of a brand-new session — add it to the sidebar
@@ -175,6 +181,14 @@ export default function ChatPage() {
 
             {messages.map((m, i) => (
               <div key={i} className={`chat-message chat-message-${m.role}`}>
+                {m.confidence && m.confidence !== "high" && (
+                  <div className={`confidence-badge confidence-${m.confidence}`}>
+                    {m.confidence === "none"
+                      ? "⚠ Not found in your documents"
+                      : "⚠ Low confidence — sources are only loosely related"}
+                  </div>
+                )}
+
                 {m.role === "assistant" ? (
                   <div className="chat-message-content markdown-body">
                     <ReactMarkdown>{m.content}</ReactMarkdown>

@@ -614,12 +614,219 @@ sufficient when deletes go through db.delete() on a loaded object graph
 SQLAlchemy's default "try to disassociate, not delete" behavior applies.
 
 ## [Day 26] Deployment architecture: embedded Chroma (PersistentClient), not a separate service
-Problem: Render (chosen for setup speed) requires any service that receives private network traffic to be on a paid tier — free services can send private requests but not receive them, confirmed directly against Render's own docs. Since Chroma's OSS version has no built-in authentication, running it as a public service was ruled out on security grounds, and running it as a private service meant it needed to receive from the FastAPI backend — which forced a paid tier (~$7/month minimum) purely for Chroma.
+
+Problem: Render (chosen for setup speed) requires any service that
+receives private network traffic to be on a paid tier — free services
+can send private requests but not receive them, confirmed directly
+against Render's own docs. Since Chroma's OSS version has no built-in
+authentication, running it as a public service was ruled out on security
+grounds, and running it as a private service meant it needed to receive
+from the FastAPI backend — which forced a paid tier (~$7/month minimum)
+purely for Chroma.
+
 Options considered, in order:
-Separate paid private Chroma service on Render (~$7/mo) — lowest code risk, deploys exactly what was already tested locally. Real cost, zero migration.
-AWS (EC2/RDS/S3) — ruled out. As of a 2025 policy change, new AWS accounts get $100-200 in credits with a 6-month auto-close clock, not the old 12-months-free model. Requires a credit card, has well- documented surprise-billing traps (NAT gateways, idle Elastic IPs, EBS on stopped instances), and solves nothing Render doesn't already solve — more risk for no clear benefit at this stage.
-Managed vector DB (Qdrant Cloud) — genuinely free forever (1GB, no card, confirmed via multiple sources as a permanent tier, unlike Pinecone's more limited free tier or Weaviate Cloud's 14-day-trial- then-$25/mo). Real architectural upside: sidesteps private networking entirely, since it's a public API reached by key, same pattern as the Gemini calls already in use. Real cost: requires migrating BOTH retrieval_service.py (to langchain-qdrant) AND ingestion_service.py (which uses the raw chromadb client directly, not LangChain) — meaning re-verifying the entire upload -> chunk -> embed -> store -> retrieve -> generate -> cite pipeline again, days before the deadline.
-Embedded Chroma (PersistentClient) — chosen. Before committing, precisely audited every file touching Chroma to confirm the real scope: chroma_client.py, config.py, and health_routes.py needed changes (3 files); retrieval_service.py and ingestion_service.py needed ZERO changes, verified directly (grepped both for HttpClient/CHROMA_HOST/CHROMA_PORT references: zero matches in either) rather than assumed. This is possible specifically because chromadb.Collection's upsert()/query() methods are client-agnostic — they don't know or care whether HttpClient or PersistentClient created them.
-Why embedded won: lowest risk, genuinely free (single Render service, no paid tier needed), and the actual code change was smaller than initially estimated once precisely scoped — 5 files, all mechanical config/client-construction changes, zero changes to tested retrieval or ingestion logic.
-Trade-off explicitly accepted: PersistentClient's data isn't guaranteed to survive a redeploy unless CHROMA_PERSIST_PATH is backed by a Render persistent disk (availability on the free tier unconfirmed at decision time). Accepted for a portfolio project — documents can be re-uploaded after a redeploy. Explicitly NOT acceptable for a real production system with real user data; documented here specifically so this isn't mistaken for a universally-good pattern rather than a context-specific trade-off.
-Also fixed while touching this code: app/api/health_routes.py's /health/chroma endpoint was constructing its own separate HttpClient instance instead of reusing the shared get_chroma_client() singleton that every other part of the app went through — a pre-existing inconsistency, found only because this migration required touching every file that referenced the old client type directly.
+
+
+Separate paid private Chroma service on Render (~$7/mo) — lowest
+code risk, deploys exactly what was already tested locally. Real cost,
+zero migration.
+AWS (EC2/RDS/S3) — ruled out. As of a 2025 policy change, new AWS
+accounts get $100-200 in credits with a 6-month auto-close clock, not
+the old 12-months-free model. Requires a credit card, has well-
+documented surprise-billing traps (NAT gateways, idle Elastic IPs,
+EBS on stopped instances), and solves nothing Render doesn't already
+solve — more risk for no clear benefit at this stage.
+Managed vector DB (Qdrant Cloud) — genuinely free forever (1GB,
+no card, confirmed via multiple sources as a permanent tier, unlike
+Pinecone's more limited free tier or Weaviate Cloud's 14-day-trial-
+then-$25/mo). Real architectural upside: sidesteps private networking
+entirely, since it's a public API reached by key, same pattern as the
+Gemini calls already in use. Real cost: requires migrating BOTH
+retrieval_service.py (to langchain-qdrant) AND ingestion_service.py
+(which uses the raw chromadb client directly, not LangChain) — meaning
+re-verifying the entire upload -> chunk -> embed -> store -> retrieve
+-> generate -> cite pipeline again, days before the deadline.
+Embedded Chroma (PersistentClient) — chosen. Before committing,
+precisely audited every file touching Chroma to confirm the real
+scope: chroma_client.py, config.py, and health_routes.py needed
+changes (3 files); retrieval_service.py and ingestion_service.py
+needed ZERO changes, verified directly (grepped both for
+HttpClient/CHROMA_HOST/CHROMA_PORT references: zero matches in
+either) rather than assumed. This is possible specifically because
+chromadb.Collection's upsert()/query() methods are client-agnostic —
+they don't know or care whether HttpClient or PersistentClient
+created them.
+
+
+Why embedded won: lowest risk, genuinely free (single Render
+service, no paid tier needed), and the actual code change was smaller
+than initially estimated once precisely scoped — 5 files, all mechanical
+config/client-construction changes, zero changes to tested retrieval or
+ingestion logic.
+
+Trade-off explicitly accepted: PersistentClient's data isn't
+guaranteed to survive a redeploy unless CHROMA_PERSIST_PATH is backed by
+a Render persistent disk (availability on the free tier unconfirmed at
+decision time). Accepted for a portfolio project — documents can be
+re-uploaded after a redeploy. Explicitly NOT acceptable for a real
+production system with real user data; documented here specifically so
+this isn't mistaken for a universally-good pattern rather than a
+context-specific trade-off.
+
+Also fixed while touching this code: app/api/health_routes.py's
+/health/chroma endpoint was constructing its own separate HttpClient
+instance instead of reusing the shared get_chroma_client() singleton
+that every other part of the app went through — a pre-existing
+inconsistency, found only because this migration required touching
+every file that referenced the old client type directly.
+
+## [Day 26] Embedded Chroma migration verified end-to-end
+
+Verification: after wiping the old (incompatible, server-format)
+local chroma_data volume, ran the full pipeline fresh: GET /health/chroma
+returned {"status": "ok", "chroma": "connected"} confirming
+PersistentClient initialized correctly; uploaded a new PDF and confirmed
+it reached status="ready"; sent a chat question and got a correctly
+grounded answer with accurate reasoning and relevant citations
+(scores 0.21 down to 0.03, sensible descending order, same pattern as
+every prior test throughout the project).
+Confirms: the "zero changes to retrieval_service.py and
+ingestion_service.py" claim held under actual testing, not just static
+code review — both files' Chroma-touching code paths (upsert during
+ingestion, similarity_search_with_score during retrieval) worked
+correctly against PersistentClient with no modification, exactly as
+predicted from chromadb's client-agnostic Collection API.
+One real hiccup during this migration, unrelated to Chroma itself:
+after removing the chroma service from docker-compose.yml, docker compose down failed with "Network incite_default: Resource is still in
+use" — the old chroma container had become an orphan (no longer
+defined in the compose file, but still running and holding the network
+open). Fixed with docker compose down --remove-orphans, which
+specifically targets containers left over from a removed service
+definition. Worth remembering: removing a service from docker-compose.yml
+doesn't automatically clean up its already-running container.
+
+## [Day 27] Deployment bugs: OOM on Render free tier, then Neon connection drops
+
+Bug 1 — deploy failed with "Ran out of memory (used over 512MB)":
+first deploy attempt crashed before the app even finished starting.
+Root cause: on Linux, PyPI's default torch wheel (a sentence-transformers
+dependency) bundles full CUDA/cuDNN support even though Render's
+instances have no GPU — confirmed by log lines showing onnxruntime
+uselessly probing for GPU devices at startup. That bundled CUDA weight
+alone was enough to exceed the free tier's 512MB cap. Windows/Mac get
+CPU-only torch by default from PyPI; Linux doesn't.
+Fix: pinned torch==2.4.1+cpu via --extra-index-url https://download.pytorch.org/whl/cpu in requirements.txt. Verified fix
+by watching the next deploy succeed ("Your service is live"). Benefits
+local builds too (smaller image, faster installs) — no reason not to use
+the CPU build everywhere given this app never needs GPU acceleration.
+Also fixed while touching this file: requirements.txt had drifted
+from the corrected, verified-compatible pins settled during the Day
+14-15 LangChain migration (chromadb, langchain-chroma,
+langchain-google-genai had reverted to the old open-ended ranges that
+originally caused that conflict) — resynced to the known-working set.
+
+Bug 2 — /health/db returned "SSL connection has been closed
+unexpectedly" intermittently: never seen locally, only after
+deploying against Neon (serverless Postgres). Root cause: Neon can
+close idle connections server-side as part of how it scales down —
+SQLAlchemy's default connection pool doesn't know that happened and
+tries to reuse what it thinks is a still-valid cached connection.
+Fix: added pool_pre_ping=True (tests each connection before handing
+it out, transparently reconnects if dead) and pool_recycle=300 (proactively
+recycles connections every 5 minutes, under any idle-timeout window a
+managed provider might enforce) to the engine in core/database.py.
+Lesson: several of this project's real bugs only surfaced once real
+infrastructure (Render's actual memory limits, Neon's actual connection
+behavior) replaced local Docker's much more forgiving defaults — a
+reminder that "works locally" and "works in the actual deployment
+environment" are genuinely different claims, not the same claim tested
+twice.
+
+## [Day 27] Deployed live — Vercel + Render + Neon, full pipeline verified
+
+Stack: Vercel (frontend), Render free web service (FastAPI + embedded
+Chroma), Neon (Postgres, free, no fixed expiry — chosen over Render's own
+Postgres specifically because it auto-pauses on inactivity instead of
+hard-deleting after a fixed 30-90 day window).
+
+Bug: 404 on any direct navigation to a client-side route.
+React Router routes (/login, /collections/{id}, etc.) only exist
+client-side — Vercel's static host returned a real 404 for any URL that
+wasn't the root, since no matching file exists there until the React app
+itself loads and takes over routing. Fixed with a vercel.json rewrite
+rule sending every non-asset request to index.html, letting React Router
+handle the actual path once the JS loads. Classic, well-known SPA
+deployment gotcha — would have hit every refresh, bookmark, and shared
+link to a specific collection/chat, not just login.
+
+Non-issue, cost real debugging time anyway: local WiFi network blocking
+Vercel's IPs specifically. ping succeeded, TCP:443 failed — isolated
+via Test-NetConnection and a mobile-data test to confirm it was the local
+router/ISP, not the deployment (Vercel's own dashboard showed the
+deployment as healthy and "Ready" throughout). Worth the reminder: when
+something fails identically across every browser AND the platform's own
+dashboard shows it healthy, the problem is probably local network, not
+the code — check that early next time rather than deep in browser
+DevTools first.
+
+Verified end-to-end on live infrastructure (not just health checks):
+register, login, create collection, upload a document through to
+status=ready, send a chat message and get a grounded answer with correct
+citations and reasoning — the full pipeline, on Render's free tier, Neon,
+and Vercel, working together.
+
+## [Day 27] Found: free-tier spin-down (not just redeploys) wipes embedded Chroma data
+
+Symptom: mid-conversation, a question about content that had been
+successfully retrieved just one message earlier ("gradient descent",
+visible in an earlier citation chip) suddenly returned zero citations
+and the "nothing relevant found" fallback. Coincided with two 502
+responses on the chat endpoint (one 9.96s, one 74ms) around the same
+time.
+Root cause: the accepted trade-off documented earlier ("embedded
+Chroma data isn't guaranteed to survive a redeploy") was understood too
+narrowly — it also applies to Render's automatic free-tier spin-down
+after ~15 minutes of inactivity, which restarts the container fresh.
+That's a far more frequent event than a code-triggered redeploy — it can
+happen several times a day, including mid-demo during any pause. On
+restart, CHROMA_PERSIST_PATH starts empty (no persistent disk was ever
+attached — only env vars were configured when the Render service was
+created), so every previously uploaded document's vectors vanish, even
+though Postgres (Neon) still correctly shows the document as
+status=ready with the right page count — the two data stores silently
+disagree after a spin-down.
+Fix: set up a free UptimeRobot monitor pinging /health every 5
+minutes, keeping the container active so the 15-minute idle threshold
+never triggers. Confirmed as a legitimate, extremely common pattern for
+Render's free tier via multiple independent sources — Render's own
+position is that a paid tier is the "clean" solution, but an external
+keep-alive ping is a normal, widely-used workaround, not against any
+terms.
+Honest limitation: this stops inactivity-based spin-downs, not
+genuine crashes or Render-side maintenance restarts — a real persistent
+disk remains the fully robust fix if zero risk is needed right before an
+actual interview.
+Lesson: re-read an accepted trade-off's actual scope carefully —
+"lost on redeploy" and "lost on this specific free-tier platform
+behavior that happens far more often than redeploys" are different
+claims, and the gap between them caused real confusion mid-testing.
+
+## [Day 27] Deployment stability confirmed: HEAD fix + keep-alive holding together
+
+Verification: after deploying the HEAD-support fix and confirming
+UptimeRobot showed no new incidents for 15+ minutes, re-uploaded a fresh
+test document and re-ran the exact query that failed before ("what is
+array"). Clean result: grounded answer, correct reasoning citing the
+right pages, citations properly ordered by score (0.65 -> 0.53 -> 0.36).
+Closes out the spin-down data-loss issue from earlier — the
+combination of (1) a real persistent-disk-free architecture decision
+(embedded Chroma, accepted trade-off) with (2) a keep-alive ping
+preventing the free-tier inactivity spin-down that would otherwise
+trigger data loss, is now a stable, working setup for continued
+testing and demos.
+Operational note for future self: any code push triggers a Render
+redeploy, which still wipes embedded Chroma data (this is a genuinely
+different trigger than the inactivity spin-down the keep-alive fixes —
+keep-alive only prevents idle-triggered restarts, not deploy-triggered
+ones). Re-upload test documents after every deploy going forward, not
+just periodically.

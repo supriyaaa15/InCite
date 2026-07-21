@@ -30,6 +30,18 @@ class Settings(BaseSettings):
     TOP_K: int = 5
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
 
+    # Confidence-aware RAG (Days 28-29). Two thresholds, not one — see
+    # docs/design-decisions.md for why a single top-score cutoff isn't
+    # reliable on its own (a real historical case had the same top score
+    # for both a correct refusal and an incorrect answer).
+    MIN_CITATION_SCORE: float = 0.05  # below this: filtered out as noise,
+    # never shown, never sent to the LLM. If nothing survives, skip
+    # generation entirely and return a deterministic "not enough info"
+    # message — no reliance on the model choosing to be honest.
+    LOW_CONFIDENCE_THRESHOLD: float = 0.35  # if the best surviving score
+    # is still below this, the answer is generated but flagged
+    # confidence="low" — surfaces genuine uncertainty instead of hiding it.
+
     # LLM
     GOOGLE_API_KEY: str  # required — no default, app won't start without it in .env
     LLM_MODEL: str = "gemini-2.5-flash"
