@@ -30,21 +30,28 @@ class Settings(BaseSettings):
     TOP_K: int = 5
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
 
-    # Confidence-aware RAG (Days 28-29). Two thresholds, not one — see
-    # docs/design-decisions.md for why a single top-score cutoff isn't
-    # reliable on its own (a real historical case had the same top score
-    # for both a correct refusal and an incorrect answer).
+    # Confidence-aware RAG (Days 28-29, recalibrated Day 30). Two
+    # boundaries, not one — see docs/design-decisions.md for why a single
+    # top-score cutoff isn't reliable on its own (a real historical case
+    # had the same top score for both a correct refusal and an incorrect
+    # answer). Thresholds tuned against this project's actual test data.
     MIN_CITATION_SCORE: float = 0.05  # below this: filtered out as noise,
     # never shown, never sent to the LLM. If nothing survives, skip
     # generation entirely and return a deterministic "not enough info"
     # message — no reliance on the model choosing to be honest.
-    LOW_CONFIDENCE_THRESHOLD: float = 0.35  # if the best surviving score
-    # is still below this, the answer is generated but flagged
-    # confidence="low" — surfaces genuine uncertainty instead of hiding it.
+    MEDIUM_CONFIDENCE_THRESHOLD: float = 0.20  # best surviving score below
+    # this (but >= MIN_CITATION_SCORE): confidence="low".
+    HIGH_CONFIDENCE_THRESHOLD: float = 0.45  # best surviving score at or
+    # above this: confidence="high". Between the two: confidence="medium".
 
     # LLM
     GOOGLE_API_KEY: str  # required — no default, app won't start without it in .env
     LLM_MODEL: str = "gemini-2.5-flash"
+    # Comma-separated, tried in order if LLM_MODEL hits a quota/rate limit
+    # or a transient error. Free-tier Gemini models can have very low daily
+    # request caps (as low as 20/day on some preview models) — a single
+    # model with no fallback means the whole app goes down once that's hit.
+    LLM_FALLBACK_MODELS: str = "gemini-2.5-flash,gemini-2.0-flash"
 
     # Storage
     UPLOAD_DIR: str = "./uploads"

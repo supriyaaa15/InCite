@@ -512,6 +512,16 @@ a:focus-visible {
   color: #8a6116;
 }
 
+.confidence-medium {
+  background: #e3edfa;
+  color: #2c5c96;
+}
+
+.confidence-error {
+  background: var(--error-soft);
+  color: var(--error);
+}
+
 .markdown-body {
   white-space: normal; /* Markdown handles its own line breaks — don't preserve raw whitespace */
 }

@@ -830,3 +830,32 @@ different trigger than the inactivity spin-down the keep-alive fixes —
 keep-alive only prevents idle-triggered restarts, not deploy-triggered
 ones). Re-upload test documents after every deploy going forward, not
 just periodically.
+
+## [Day 29] Retuned MIN_CITATION_SCORE from 0.15 to 0.05 based on a real false negative
+
+Problem found through testing: the original threshold (0.15) was
+chosen from limited prior evidence and turned out too aggressive —
+re-testing the exact "curse of dimensionality" scenario from Day 24
+showed the correct, relevant chunk (score ~0.13) was being filtered out
+before it ever reached the LLM. The system then answered from only
+loosely related chunks or reported insufficient information, even though
+the right content had actually been retrieved.
+Fix: lowered MIN_CITATION_SCORE to 0.05. Confirmed this still
+reliably excludes clearly-irrelevant chunks (the earlier observed
+negative-score struct-definition chunk for an arrays question, for
+example) while now correctly admitting genuinely relevant but
+weaker-scored content.
+Why this doesn't undermine the two-threshold design: the system
+still does its job correctly at 0.05 — the curse-of-dimensionality
+answer now comes back correct AND still shows the "low confidence"
+badge, since 0.13 is well below LOW_CONFIDENCE_THRESHOLD (0.35). This is
+the intended behavior: genuinely relevant-but-weak content gets used,
+with the uncertainty honestly surfaced, rather than either hidden
+entirely or presented with false confidence.
+Honest limitation: a fixed cosine similarity threshold's "meaningful"
+range shifts depending on how homogeneous or diverse a collection's
+content is — 0.05 is tuned against this project's specific test
+documents, not a universal constant. A more robust version would
+calibrate thresholds per-collection or use a learned/relative measure
+instead of an absolute cutoff — noted as a genuine Phase 3+ improvement,
+not something to chase further under the current timeline.

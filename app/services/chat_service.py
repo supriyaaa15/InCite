@@ -43,6 +43,24 @@ class AnswerWithReasoning(BaseModel):
     )
 
 
+# Substring matches against the exception's own message — deliberately
+# string-based rather than importing specific exception classes, since
+# the exact exception types vary across google-genai/langchain-google-genai
+# SDK versions and this project has already been bitten twice by assuming
+# a specific version's API shape. Matching on message content is more
+# resilient to that kind of drift.
+_QUOTA_ERROR_MARKERS = ("429", "resource_exhausted", "quota")
+_TRANSIENT_ERROR_MARKERS = ("503", "timeout", "timed out", "unavailable", "deadline exceeded")
+
+
+def _is_quota_error(exc: Exception) -> bool:
+    return any(marker in str(exc).lower() for marker in _QUOTA_ERROR_MARKERS)
+
+
+def _is_transient_error(exc: Exception) -> bool:
+    return any(marker in str(exc).lower() for marker in _TRANSIENT_ERROR_MARKERS)
+
+
 def get_owned_session(db: Session, user_id: uuid.UUID, session_id: uuid.UUID) -> ChatSession:
     session = chat_repository.get_session_by_id(db, session_id)
     if session is None or session.user_id != user_id:
@@ -62,6 +80,65 @@ def list_messages(db: Session, user_id: uuid.UUID, session_id: uuid.UUID) -> lis
 def delete_session(db: Session, user_id: uuid.UUID, session_id: uuid.UUID) -> None:
     session = get_owned_session(db, user_id, session_id)
     chat_repository.delete_session(db, session)
+
+
+def _try_model(model_name: str, prompt: str) -> tuple[str, str]:
+    """
+    One attempt against one model. Tries structured output first; if that
+    fails to parse (not necessarily an API error — could just be the
+    model not returning valid JSON), falls back to a plain call for this
+    same model before giving up on it. Whatever exception surfaces here
+    is what _invoke_with_fallback classifies as quota/transient/other.
+    """
+    llm = get_llm(model_name)
+    try:
+        structured_llm = llm.with_structured_output(AnswerWithReasoning)
+        result = structured_llm.invoke(prompt)
+        answer = result.answer.strip()
+        reasoning = result.reasoning.strip()
+        if not answer:
+            raise ValueError("model returned an empty answer")
+        return answer, reasoning
+    except Exception as structured_error:
+        if _is_quota_error(structured_error) or _is_transient_error(structured_error):
+            raise  # a real API problem — let the fallback chain handle it, don't mask it with a retry
+        response = llm.invoke(prompt)
+        content = response.content.strip()
+        if not content:
+            raise ValueError("model returned an empty response")
+        return content, ""  # no structured reasoning from a plain call
+
+
+def _invoke_with_fallback(prompt: str) -> tuple[str | None, str | None, str]:
+    """
+    Tries LLM_MODEL first, then each of LLM_FALLBACK_MODELS in order.
+    One retry per model for transient errors (503, timeout) with a short
+    backoff; quota errors (429/RESOURCE_EXHAUSTED) skip straight to the
+    next model, since retrying the same exhausted model can't help.
+
+    Returns (answer, reasoning, model_used). answer is None only if every
+    model in the chain failed — the caller is responsible for turning
+    that into a user-facing message, this function never raises for an
+    exhausted chain.
+    """
+    models_to_try = [settings.LLM_MODEL] + [
+        m.strip() for m in settings.LLM_FALLBACK_MODELS.split(",") if m.strip()
+    ]
+
+    for model_name in models_to_try:
+        for attempt in range(2):
+            try:
+                answer, reasoning = _try_model(model_name, prompt)
+                return answer, reasoning, model_name
+            except Exception as e:
+                if _is_quota_error(e):
+                    break  # this model is exhausted — no point retrying, try the next one
+                if _is_transient_error(e) and attempt == 0:
+                    time.sleep(1.5)
+                    continue
+                break  # unrecognized error, or out of retries — try the next model anyway
+
+    return None, None, ""
 
 
 def _fallback_reasoning(citations: list[dict]) -> str:
@@ -99,17 +176,18 @@ def _no_confidence_answer() -> tuple[str, str]:
     )
 
 
-def _generate_answer(question: str, citations: list[dict], history: list[dict]) -> tuple[str, str]:
+def _generate_answer(
+    question: str, citations: list[dict], history: list[dict]
+) -> tuple[str, str, str]:
     """
-    Returns (answer, reasoning). citations here are already filtered
-    (filter_citations() has run in send_message before this is called) —
-    every chunk weak enough to be noise has already been removed, so
-    everything reaching the prompt is something worth answering from.
-    history is prior turns in this session ([{role, content}, ...],
-    oldest first, current question NOT included) — without it, a
-    follow-up like "why is it used" has no way to resolve what "it"
-    refers to, and the model has no basis for narrowing down which
-    retrieved concept the user actually means.
+    Returns (answer, reasoning, model_used). citations here are already
+    filtered (filter_citations() has run in send_message before this is
+    called) — every chunk weak enough to be noise has already been
+    removed, so everything reaching the prompt is something worth
+    answering from. history is prior turns in this session
+    ([{role, content}, ...], oldest first, current question NOT
+    included) — without it, a follow-up like "why is it used" has no way
+    to resolve what "it" refers to.
     """
     history_block = ""
     if history:
@@ -149,22 +227,22 @@ Context:
 
 Question: {question}"""
 
-    try:
-        structured_llm = get_llm().with_structured_output(AnswerWithReasoning)
-        result = structured_llm.invoke(prompt)
-        answer = result.answer.strip()
-        reasoning = result.reasoning.strip() or _fallback_reasoning(citations)
-        if not answer:
-            raise ValueError("model returned an empty answer")
-        return answer, reasoning
-    except Exception:
-        # Model didn't return valid structured output, or the call failed
-        # for some other reason — don't crash the request over it. Fall
-        # back to a plain unstructured call for the answer, and build
-        # reasoning deterministically from citation metadata rather than
-        # trusting the model's formatting.
-        response = get_llm().invoke(prompt)
-        return response.content.strip(), _fallback_reasoning(citations)
+    answer, reasoning, model_used = _invoke_with_fallback(prompt)
+
+    if answer is None:
+        # Every model in the fallback chain failed — most likely every
+        # configured model has hit its quota. A crash here would show the
+        # user a raw "Failed to fetch"; this is the friendly alternative.
+        return (
+            "The AI service has reached its daily quota. Please try again later.",
+            "No answer could be generated — every configured AI model is "
+            "currently unavailable or has reached its quota.",
+            "",
+        )
+
+    if not reasoning:
+        reasoning = _fallback_reasoning(citations)
+    return answer, reasoning, model_used
 
 
 def send_message(
@@ -183,8 +261,10 @@ def send_message(
 
     Returns (session, answer, reasoning, public_citations, confidence).
     confidence is "none" (nothing cleared the noise filter, LLM never
-    called), "low" (an answer was generated, but the best supporting
-    citation is still below LOW_CONFIDENCE_THRESHOLD), or "high".
+    called), "error" (retrieval found something, but every configured LLM
+    failed/hit quota), "low" or "medium" or "high" (based on the best
+    surviving citation score against MEDIUM_CONFIDENCE_THRESHOLD and
+    HIGH_CONFIDENCE_THRESHOLD).
     """
     collection_service.get_owned_collection(db, user_id, collection_id)
 
@@ -215,13 +295,24 @@ def send_message(
     filtered_citations = retrieval_service.filter_citations(citations, settings.MIN_CITATION_SCORE)
 
     llm_start = time.time()
+    model_used = ""
     if not filtered_citations:
         answer, reasoning = _no_confidence_answer()
         confidence = "none"
     else:
-        answer, reasoning = _generate_answer(message_text, filtered_citations, history)
+        answer, reasoning, model_used = _generate_answer(message_text, filtered_citations, history)
         top_score = max(c["score"] for c in filtered_citations)
-        confidence = "low" if top_score < settings.LOW_CONFIDENCE_THRESHOLD else "high"
+        if not model_used:
+            # retrieval succeeded but every LLM in the chain failed —
+            # distinct from a retrieval-quality problem, so it gets its
+            # own confidence value rather than being folded into "low"
+            confidence = "error"
+        elif top_score >= settings.HIGH_CONFIDENCE_THRESHOLD:
+            confidence = "high"
+        elif top_score >= settings.MEDIUM_CONFIDENCE_THRESHOLD:
+            confidence = "medium"
+        else:
+            confidence = "low"
     llm_time_ms = int((time.time() - llm_start) * 1000)
 
     # Excerpted version is what actually leaves the server — API response
@@ -248,7 +339,9 @@ def send_message(
         similarity_scores=[c["score"] for c in citations],
         top_k=settings.TOP_K,
         response_time_ms=retrieval_time_ms + llm_time_ms,
-        llm_model=settings.LLM_MODEL,
+        llm_model=model_used or settings.LLM_MODEL,  # log which model actually
+        # answered, not just the configured primary — this is the whole
+        # point of the fallback chain being observable, not a black box
     )
 
     return session, answer, reasoning, public_citations, confidence

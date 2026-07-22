@@ -183,9 +183,10 @@ export default function ChatPage() {
               <div key={i} className={`chat-message chat-message-${m.role}`}>
                 {m.confidence && m.confidence !== "high" && (
                   <div className={`confidence-badge confidence-${m.confidence}`}>
-                    {m.confidence === "none"
-                      ? "⚠ Not found in your documents"
-                      : "⚠ Low confidence — sources are only loosely related"}
+                    {m.confidence === "none" && "⚠ Not found in your documents"}
+                    {m.confidence === "low" && "⚠ Low confidence — sources are only loosely related"}
+                    {m.confidence === "medium" && "ℹ Medium confidence"}
+                    {m.confidence === "error" && "⚠ AI service temporarily unavailable"}
                   </div>
                 )}
 
