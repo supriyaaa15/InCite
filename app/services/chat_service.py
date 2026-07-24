@@ -10,6 +10,10 @@ from app.models.chat import ChatSession, MessageRole
 from app.repositories import chat_repository, query_log_repository
 from app.services import collection_service, retrieval_service
 
+import logging
+
+logger = logging.getLogger(__name__) 
+
 
 class ChatSessionNotFoundError(Exception):
     """Same error for missing and not-owned — see collection_service for
@@ -126,11 +130,13 @@ def _invoke_with_fallback(prompt: str) -> tuple[str | None, str | None, str]:
     ]
 
     for model_name in models_to_try:
+        logger.warning(f"Trying model: {model_name}")
         for attempt in range(2):
             try:
                 answer, reasoning = _try_model(model_name, prompt)
                 return answer, reasoning, model_name
             except Exception as e:
+                logger.warning(f"{model_name} failed: {e}")
                 if _is_quota_error(e):
                     break  # this model is exhausted — no point retrying, try the next one
                 if _is_transient_error(e) and attempt == 0:

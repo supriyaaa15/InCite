@@ -859,3 +859,11 @@ documents, not a universal constant. A more robust version would
 calibrate thresholds per-collection or use a learned/relative measure
 instead of an absolute cutoff — noted as a genuine Phase 3+ improvement,
 not something to chase further under the current timeline.
+
+## [Day 30] Confidence recalibration — fixed a real miscalibration bug
+
+Problem found through testing: a citation with similarity ~0.6 (a strong match) was still showing a "Low Confidence" badge — the original single-threshold design (LOW_CONFIDENCE_THRESHOLD=0.35) was a coarse binary split that didn't map cleanly to the actual score distribution observed across real testing. Fix: replaced the single threshold with two boundaries — MEDIUM_CONFIDENCE_THRESHOLD (0.20) and HIGH_CONFIDENCE_THRESHOLD (0.45) — giving a proper three-tier confidence display (high/medium/low) plus the existing "none" (filtered out entirely) and a new "error" state (retrieval succeeded but every LLM failed — a service issue, not a retrieval-quality one, so it gets its own distinct badge rather than being folded into "low"). Thresholds remain empirically tuned against this project's actual test data, not a universal calibration — same honest limitation noted for MIN_CITATION_SCORE on Day 29.
+
+## [Day 30] Scope check: upload limits, validation, and Document Health Report deferred
+
+Decision: three more requested features (upload size/count limits, malformed-PDF validation, a "Document Health Report" showing pages/chunks/OCR-readiness) were evaluated and deliberately deferred with the actual deadline in view. Why: the Document Health Report is, functionally, the Phase 3 "Document Intelligence Report" already scoped and explicitly deferred in this same log and in README.md's Future Work section — building it now, last-minute, would have quietly undone that scoping discipline rather than extend it. Upload limits/validation are reasonable, bounded hardening, but with a demo video and final bug pass still outstanding on the actual last day, shipping a stable, well-documented, working project took priority over adding more surface area right before presenting it. Not abandoned — tracked explicitly as Phase 2 (upload limits/validation, genuinely small scope, good candidate for the very next session) and Phase 3 (Document Health Report, already covered) rather than silently dropped.
