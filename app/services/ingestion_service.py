@@ -133,6 +133,8 @@ def ingest_document(document_id: str) -> None:
         # )
 
     except Exception:
+
+        db.rollback()
         # Mark the document failed so the frontend has something concrete
         # to show instead of a permanently stuck "processing" status.
         # Re-raised so the traceback still shows up in the app logs.
