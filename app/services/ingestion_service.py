@@ -12,6 +12,7 @@ from app.utils.pdf_processing import chunk_text, load_pages
 
 logger = logging.getLogger(__name__)
 
+BATCH_SIZE = 32
 
 def ingest_document(document_id: str) -> None:
 
@@ -33,7 +34,7 @@ def ingest_document(document_id: str) -> None:
     slow, e.g. local Docker vs. the deployed free-tier instance. Only
     logged on successful completion, per the early-return paths below.
     """
-    db = SessionLocal()
+    db = SessionLocal() 
     document = None
     total_start = time.perf_counter()
     try:
@@ -61,56 +62,77 @@ def ingest_document(document_id: str) -> None:
             document_repository.update_status(db, document, DocumentStatus.failed)
             return
 
-        stage_start = time.perf_counter()
+        BATCH_SIZE = 32
 
-        try:
-            print("Getting embedder...")
-            embedder = get_embedder()
+        print("Getting embedder...")
+        embedder = get_embedder()
+        print("Embedder loaded")
 
-            print("Embedder loaded")
-
-            texts = [c["content"] for c in all_chunks]
-            print(f"Encoding {len(texts)} chunks...")
-
-            embeddings = embedder.encode(texts).tolist()
-
-            print("Embeddings generated")
-
-        except Exception as e:
-            print(f"Embedding failed: {e!r}")
-            raise
-
-        embedding_time = time.perf_counter() - stage_start
-
-        stage_start = time.perf_counter()
         store = get_collection_store(str(document.collection_id))
-        ids = [f"{document.id}_p{c['page_number']}_c{c['chunk_index']}" for c in all_chunks]
-        metadatas = [
-            {
-                "document_id": str(document.id),
-                "page_number": c["page_number"],
-                "chunk_index": c["chunk_index"],
-            }
-            for c in all_chunks
-        ]
-        store.upsert(ids=ids, embeddings=embeddings, documents=texts, metadatas=metadatas)
-        print("4. Chroma done")
-        chroma_upsert_time = time.perf_counter() - stage_start
 
-        stage_start = time.perf_counter()
-        chunk_rows = [
-            {
-                "document_id": document.id,
-                "page_number": c["page_number"],
-                "chunk_index": c["chunk_index"],
-                "content": c["content"],
-                "chroma_id": chroma_id,
-            }
-            for c, chroma_id in zip(all_chunks, ids)
-        ]
-        chunk_repository.bulk_create(db, chunk_rows)
+        embedding_time = 0.0
+        chroma_upsert_time = 0.0
+        postgres_insert_time = 0.0
+
+        for batch_start in range(0, len(all_chunks), BATCH_SIZE):
+            batch = all_chunks[batch_start: batch_start + BATCH_SIZE]
+
+            texts = [c["content"] for c in batch]
+
+            print(f"Encoding batch {batch_start // BATCH_SIZE + 1} ({len(texts)} chunks)...")
+
+            # -------- Embeddings --------
+            t0 = time.perf_counter()
+            embeddings = embedder.encode(texts).tolist()
+            embedding_time += time.perf_counter() - t0
+
+            # -------- Chroma --------
+            batch_ids = [
+                f"{document.id}_p{c['page_number']}_c{c['chunk_index']}"
+                for c in batch
+            ]
+
+            batch_metadatas = [
+                {
+                    "document_id": str(document.id),
+                    "page_number": c["page_number"],
+                    "chunk_index": c["chunk_index"],
+                }
+                for c in batch
+            ]
+
+            t0 = time.perf_counter()
+
+            store.upsert(
+                ids=batch_ids,
+                embeddings=embeddings,
+                documents=texts,
+                metadatas=batch_metadatas,
+            )
+
+            chroma_upsert_time += time.perf_counter() - t0
+
+            # -------- Postgres --------
+            batch_rows = [
+                {
+                    "document_id": document.id,
+                    "page_number": c["page_number"],
+                    "chunk_index": c["chunk_index"],
+                    "content": c["content"],
+                    "chroma_id": chroma_id,
+                }
+                for c, chroma_id in zip(batch, batch_ids)
+            ]
+
+            t0 = time.perf_counter()
+
+            chunk_repository.bulk_create(db, batch_rows)
+
+            postgres_insert_time += time.perf_counter() - t0
+
+        print("Embeddings generated")
+        print("4. Chroma done")
         print("5. Postgres done")
-        postgres_insert_time = time.perf_counter() - stage_start
 
         stage_start = time.perf_counter()
         document_repository.update_status(
