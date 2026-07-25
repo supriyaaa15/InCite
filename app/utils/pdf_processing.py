@@ -8,6 +8,20 @@ implementation instead of two copies drifting apart.
 import fitz  # PyMuPDF
 
 
+def iter_pages(pdf_path: str):
+    """
+    Yields non-empty pages one at a time as (page_number, page_text).
+
+    This is the streaming form used by ingestion so it can process a PDF
+    incrementally instead of materializing the entire page list first.
+    """
+    with fitz.open(pdf_path) as pdf:
+        for i, page in enumerate(pdf, start=1):
+            text = (page.get_text() or "").replace("\x00", "") #prevents PostgreSQL from receiving NUL characters.
+            if text.strip():
+                yield i, text
+
+
 def load_pages(pdf_path: str) -> list[tuple[int, str]]:
     """
     Returns [(page_number, page_text), ...]. Page numbers start at 1.
@@ -21,13 +35,7 @@ def load_pages(pdf_path: str) -> list[tuple[int, str]]:
     than pdfplumber — an acceptable trade-off here since this pipeline
     only needs raw extractable text, not structured layout data.
     """
-    pages = []
-    with fitz.open(pdf_path) as pdf:
-        for i, page in enumerate(pdf, start=1):
-            text = (page.get_text() or "").replace("\x00", "") #prevents PostgreSQL from receiving NUL characters.
-            if text.strip():
-                pages.append((i, text))
-    return pages
+    return list(iter_pages(pdf_path))
 
 
 def chunk_text(text: str, chunk_size: int, overlap: int) -> list[str]:
