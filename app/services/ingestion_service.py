@@ -62,10 +62,24 @@ def ingest_document(document_id: str) -> None:
             return
 
         stage_start = time.perf_counter()
-        embedder = get_embedder()
-        texts = [c["content"] for c in all_chunks]
-        embeddings = embedder.encode(texts).tolist()
-        print("3. Embedded")
+
+        try:
+            print("Getting embedder...")
+            embedder = get_embedder()
+
+            print("Embedder loaded")
+
+            texts = [c["content"] for c in all_chunks]
+            print(f"Encoding {len(texts)} chunks...")
+
+            embeddings = embedder.encode(texts).tolist()
+
+            print("Embeddings generated")
+
+        except Exception as e:
+            print(f"Embedding failed: {e!r}")
+            raise
+
         embedding_time = time.perf_counter() - stage_start
 
         stage_start = time.perf_counter()
