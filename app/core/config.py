@@ -25,8 +25,8 @@ class Settings(BaseSettings):
     # RAG tuning — change these to experiment with retrieval strategy.
     # query_logs.top_k records which value produced which answer, so you
     # can compare experiments after the fact.
-    CHUNK_SIZE: int = 500
-    CHUNK_OVERLAP: int = 50
+    CHUNK_SIZE: int = 1000
+    CHUNK_OVERLAP: int = 150
     TOP_K: int = 5
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
 
