@@ -867,3 +867,153 @@ Problem found through testing: a citation with similarity ~0.6 (a strong match) 
 ## [Day 30] Scope check: upload limits, validation, and Document Health Report deferred
 
 Decision: three more requested features (upload size/count limits, malformed-PDF validation, a "Document Health Report" showing pages/chunks/OCR-readiness) were evaluated and deliberately deferred with the actual deadline in view. Why: the Document Health Report is, functionally, the Phase 3 "Document Intelligence Report" already scoped and explicitly deferred in this same log and in README.md's Future Work section — building it now, last-minute, would have quietly undone that scoping discipline rather than extend it. Upload limits/validation are reasonable, bounded hardening, but with a demo video and final bug pass still outstanding on the actual last day, shipping a stable, well-documented, working project took priority over adding more surface area right before presenting it. Not abandoned — tracked explicitly as Phase 2 (upload limits/validation, genuinely small scope, good candidate for the very next session) and Phase 3 (Document Health Report, already covered) rather than silently dropped.
+
+## ## [Day 31] Deployment migration: Render → Railway, PDF ingestion optimization, and parser replacement
+
+**Problem:** two independent issues remained after the Day 30 feature freeze. First, Render's free tier introduced operational friction (cold starts, memory constraints, and repeated deployment-specific workarounds) that complicated demos despite the application itself being stable. Second, large PDF ingestion was still slower than desired: a 90-page document consistently required roughly two minutes to finish chunking, embedding, and indexing.
+
+**Decision 1 — migrated deployment from Render to Railway.**
+
+**Why:** Railway provides a more predictable environment for this project's backend without the deployment limitations repeatedly encountered on Render's free tier. The migration removed infrastructure-specific debugging from the critical path while leaving the application architecture unchanged. No retrieval, embedding, or API logic changed — only the hosting platform.
+
+**Decision 2 — retuned the chunking strategy from the original conservative settings to CHUNK_SIZE=1000 and CHUNK_OVERLAP=150.**
+
+**Why:** profiling suggested the dominant cost was not the embedding model itself but the number of chunks being produced. Every chunk requires text embedding, vector insertion into Chroma, metadata persistence, and indexing. Larger chunks reduced the total chunk count substantially while still preserving enough overlap for context continuity during retrieval.
+
+**Result:** indexing time for a real 90-page PDF dropped from roughly **119 seconds to approximately 14 seconds** (~88% reduction) with no observed degradation in retrieval quality during testing. This eliminated the earlier temptation to switch to a cloud embedding API purely for performance, preserving the original privacy design where embeddings are generated locally and document contents are not sent to a third-party embedding service.
+
+**Decision 3 — replaced pdfplumber with PyMuPDF for PDF text extraction.**
+
+**Why:** PyMuPDF (fitz) provides significantly faster document parsing while maintaining high extraction quality for digitally-generated PDFs. Since PDF parsing is part of every ingestion request, reducing extraction time improves end-to-end indexing latency without changing any downstream RAG logic. The rest of the ingestion pipeline (chunking → embedding → Chroma storage) remained unchanged.
+
+**Trade-off acknowledged:** increasing chunk size means each retrieved chunk contains more surrounding context, slightly increasing prompt size sent to the LLM. Given the large reduction in indexing time and no observed retrieval regression across the project's test documents, this was accepted as the better engineering trade-off for the current system.
+
+---
+
+## [Day 32] Upload pipeline hardening: validation, error codes, graceful failures, and frontend UX
+
+**Problem:** the upload pipeline had grown organically without any formal validation layer. Several production-readiness gaps had accumulated:
+
+1. Any file type was accepted — a user could upload a `.exe` renamed to `.pdf` and it would be saved to disk, a DB row created, and the background task would spin until fitz crashed.
+2. Corrupted, password-protected, and image-only PDFs produced a generic `failed` status with no explanation stored anywhere — the frontend had no way to tell the user what went wrong.
+3. The `documents` table had no columns to hold an error code or message, so even if the backend computed the reason, it had nowhere to persist it.
+4. The ingestion service caught all exceptions with a bare `except Exception` block, logged nothing structured, and re-raised — stack traces appeared in the raw server log but no diagnostic information reached the database or the API response.
+5. `MemoryError` was implicitly treated the same as any other exception, with no special handling.
+6. Partial data accumulation: if ingestion crashed mid-way, already-written Chroma vectors and Postgres chunk rows were left orphaned, silently corrupting future retrieval results for that collection.
+7. No configurable limits existed — a 2 GB, 5000-page PDF would be accepted and processed with no safeguard.
+8. The frontend showed a plain `"failed"` badge with no message and no recovery action, leaving users with no information and no next step.
+
+---
+
+### Decision 1 — add configurable upload limits via the existing `Settings` infrastructure
+
+**What changed:** added `MAX_UPLOAD_SIZE_MB` (default 20) and `MAX_PDF_PAGES` (default 800) to the `Settings` class in `app/core/config.py`, with a derived `max_upload_size_bytes` property to avoid scattering `* 1024 * 1024` conversions across callsites. Both values are overridable via environment variables, consistent with every other tunable in the system. Added corresponding entries to `.env.example` with inline comments.
+
+**Why:** hardcoding limits inside route handlers or service functions was the obvious alternative, but it would have violated the project's existing convention (established from Day 1) that all configuration lives in `Settings` and is never hardcoded. Centralising the limits also means a single env var change takes effect everywhere without a code deploy.
+
+**Why these defaults:** 20 MB covers the vast majority of academic PDFs used in RAG workflows. 800 pages is a generous ceiling — a typical textbook runs 300–600 pages. Both values are deliberately conservative for a free-tier deployment while still being easy to raise in production.
+
+---
+
+### Decision 2 — introduce a dedicated error vocabulary module (`app/utils/upload_errors.py`)
+
+**What changed:** created a new module with two exports:
+
+- `UploadErrorCode` — a `str` enum of ten machine-readable codes: `INVALID_FILE`, `INVALID_PDF`, `PASSWORD_PROTECTED`, `EMPTY_DOCUMENT`, `NO_EXTRACTABLE_TEXT`, `FILE_TOO_LARGE`, `PAGE_LIMIT_EXCEEDED`, `RESOURCE_LIMIT`, `PROCESSING_TIMEOUT`, `INTERNAL_ERROR`.
+- `UploadValidationError(Exception)` — a custom exception that carries both an `error_code` and a `user_message`, with a centralised default message per code. Callers can optionally supply a custom message (e.g. to include the actual configured limit in the text).
+
+**Why a dedicated module rather than inline strings:** the route handler and the ingestion service both need to raise and catch the same errors. Without a shared vocabulary the codes would have been string literals duplicated across two files, guaranteed to drift. A single import resolves that. The `_USER_MESSAGES` dictionary also acts as a single place to update copy if wording changes — the strings are UI surface, and keeping them out of business logic makes that easier.
+
+**Why a custom exception class rather than returning error codes as values:** raising an exception means any failure path — however nested — automatically propagates to the correct handler without the caller having to inspect return values. It also separates the "what went wrong" (error code) from the "what to show" (user message) in a typed, self-documenting way.
+
+---
+
+### Decision 3 — two-phase PDF validation (`app/utils/pdf_validator.py`)
+
+**What changed:** introduced a new module with two functions called in sequence by the route handler:
+
+**Phase 1 — `validate_upload(file)`** runs *before* writing to disk:
+- Enforces the size limit by seeking to the end of the upload stream and seeking back.
+- Checks MIME type and file extension as *hints only* — not as the authoritative gate.
+
+**Phase 2 — `validate_pdf_file(file_path)`** runs *after* saving to disk:
+- Calls `fitz.open()` — this is the single authoritative decision on whether the file is a PDF. If fitz can't open it, it's not a PDF, regardless of what the `Content-Type` header or filename says.
+- Checks `pdf.is_encrypted` before accessing pages (accessing page content on a locked document raises its own exception rather than returning useful data).
+- Checks `pdf.page_count == 0` (empty document).
+- Checks `pdf.page_count > MAX_PDF_PAGES` (page limit exceeded).
+- Iterates pages, accumulating character counts, short-circuiting as soon as any text is found. Zero total characters → `NO_EXTRACTABLE_TEXT`.
+
+**Why fitz rather than MIME/extension as the authoritative check:** a file's MIME type is set by the client and can be spoofed trivially. A file extension is just a naming convention. A user can rename `virus.exe` to `notes.pdf` or set `Content-Type: application/pdf` on any binary payload. `fitz.open()` actually parses the PDF byte structure — it cannot be fooled by metadata. MIME and extension are kept as a first-pass *hint* to give faster, friendlier feedback for accidental wrong-file selections before the cost of a disk write.
+
+**Why both phases rather than one:** size validation must happen before saving to disk (no point writing a 500 MB file just to reject it). Structural PDF validation (`fitz.open()`) requires a file path — it cannot operate on an in-memory `SpooledTemporaryFile` reliably across all fitz versions. The two-phase split matches the physical reality of the operation.
+
+**Why `NO_EXTRACTABLE_TEXT` is not treated as a hard rejection of an invalid file:** a scanned PDF is a perfectly valid PDF — it just has no machine-readable text. The pipeline cannot *process* it (no OCR is implemented), but that is a pipeline limitation, not a document defect. Telling the user "invalid PDF" would be a lie. The correct message is: "This PDF contains only scanned images. OCR is not currently supported." This is a product capability boundary, not a validation failure.
+
+**Why validation runs synchronously in the route handler:** running validation in the background task was evaluated and rejected. The key reason is orphaned rows: if validation is deferred to the background, the route handler must create the `documents` DB row before knowing whether the file is valid. A background failure then requires the client to poll to discover rejection. Running validation synchronously (in the route handler, before `document_repository.create()`) means invalid files are rejected with an immediate HTTP 422 and *no DB row is ever created*. No polling, no orphaned rows, no "processing" that immediately becomes "failed". The cost — the user waits slightly longer before getting the 422 — is measured in milliseconds (fitz validation is fast: open file, check header, check page count, spot-check for text).
+
+---
+
+### Decision 4 — add `error_code` and `error_message` columns to the `documents` table
+
+**What changed:** added two nullable columns — `error_code VARCHAR` and `error_message TEXT` — to the `documents` table via a new Alembic migration (`a1b2c3d4e5f6`). Updated the `Document` SQLAlchemy model, the `DocumentResponse` Pydantic schema (so both fields are returned in the API response), and the `document_repository.update_status()` function (to accept and persist both fields).
+
+**Why nullable with no default:** existing rows remain valid with `NULL` in both columns, which the application treats as "no error recorded". The migration is additive and backward-safe — zero downtime, no data loss.
+
+**Why store the message on the DB row rather than computing it at query time:** the error message can depend on runtime context (e.g. the actual page count vs. the configured limit) that isn't reconstructable later from just an error code. Storing the full message at failure time ensures the frontend always shows exactly the right text, even if the configuration changes between failure and the next API poll.
+
+---
+
+### Decision 5 — structured exception hierarchy in the ingestion service
+
+**What changed:** replaced the bare `except Exception: ... raise` block with three explicit handlers:
+
+1. `except UploadValidationError` — for secondary validation failures that surface during ingestion (e.g. a PDF that passes pre-flight but yields zero chunks). Uses the error's own `error_code` and `user_message` directly.
+2. `except MemoryError` — maps to `RESOURCE_LIMIT` with a friendly message about resource constraints.
+3. `except Exception` — catch-all for truly unexpected failures, maps to `INTERNAL_ERROR`. Logs the full stack trace via `logger.exception()` (server-side only).
+
+**Why separate `MemoryError` from `Exception`:** in Python, `MemoryError` is a subclass of `BaseException`, not `Exception`, in some versions — but more importantly, it signals a qualitatively different failure: the worker ran out of heap memory, not a logic error or external service failure. Separating it lets the code give a specific, honest user message ("resource constraints") rather than the generic "unexpected error" message, and lets monitoring systems distinguish OOM events from bugs.
+
+**Why not try to catch OOMKilled / SIGKILL:** infrastructure-level process kills (Kubernetes OOMKilled, Docker kill, `kill -9`, exit code 137) terminate the OS process before any Python exception handler executes. The Python runtime is simply gone — there is no `except` block that runs. Attempting to "handle" these with Python code is not possible. The only mitigations are infrastructure-level (resource limits, watchdog processes, external health checks). The code documents this clearly: "Infrastructure-level kills may terminate the worker before exception handling executes." Overpromising in the code (e.g. `except BaseException` with a comment "catches OOM kills") would be technically incorrect and misleading.
+
+---
+
+### Decision 6 — cleanup of partial data on ingestion failure
+
+**What changed:** introduced `_cleanup_partial_data(db, document, store)`, called by the central `_mark_failed()` helper before writing the failed status. The function:
+
+1. Queries Chroma for all vectors with `document_id` matching the failed document and deletes them.
+2. Deletes all Postgres chunk rows for the document via `chunk_repository.delete_by_document()`.
+3. Logs cleanup results at `INFO` level (Chroma) or catches and logs any cleanup exceptions, then continues — cleanup errors are never re-raised.
+
+**Why cleanup is necessary:** ingestion processes documents in batches. A crash on batch 7 of 12 means batches 1–6 have already been written to both Chroma and Postgres. Without cleanup, these partial embeddings remain in the collection's Chroma store and will be retrieved by future queries, silently mixing valid content with an incomplete document's fragments. This corrupts retrieval quality for the whole collection without any visible signal.
+
+**Why cleanup errors are suppressed rather than raised:** the primary obligation of the failure path is to mark the document as `failed` so the frontend can stop polling. If cleanup itself fails (e.g. Chroma is temporarily unavailable), raising that exception would prevent the `failed` status from being written, leaving the document permanently stuck in `processing`. Logging the cleanup failure and continuing is the correct trade-off: the operator is alerted, the user is not stuck.
+
+---
+
+### Decision 7 — structured failure logging fields
+
+**What changed:** every failure log call (at `WARNING`, `ERROR`, or `EXCEPTION` level) now includes: `document_id`, `collection_id`, `filename`, `error_code`, and `elapsed_time`. Success logging (the timings block) remained as temporary `print()` statements to preserve the existing Docker terminal profiling workflow during active development.
+
+**Why elapsed time in failure logs:** knowing *how long* a job ran before failing is diagnostically valuable. A job that fails in 0.03 seconds failed in pre-processing (e.g. file open). A job that fails after 45 seconds failed mid-embedding or mid-Chroma write. This immediately narrows the search space when reading logs.
+
+**Why keep `print()` for the success timings block:** the ingestion pipeline is still under active profiling — embedding, chunking, Chroma upsert, and Postgres insert times are being measured in the Docker terminal. `print()` output appears immediately without log-level configuration. These are explicitly temporary debugging/profiling statements, not production logs. The decision was made to preserve them during the active development phase and convert to structured `logger.*` calls once profiling is complete. This was a deliberate product decision, not an oversight.
+
+**Why stack traces never reach the API response or the database `error_message` column:** exposing stack traces to users is a security and UX problem simultaneously. Internally, a full stack trace contains file paths, variable names, and sometimes data values that should never leave the server. Externally, a raw Python traceback is meaningless to a user and creates distrust. The pattern used here — `logger.exception()` on the server, a static friendly string in `error_message` — is the standard production approach for this exact situation.
+
+---
+
+### Decision 8 — frontend failure UX
+
+**What changed:**
+
+- The `"failed"` status badge now shows alongside the backend's `error_message` displayed inline below the filename — e.g. *"This PDF is password-protected. Remove the password from the PDF and try uploading it again."*
+- Failed document rows get a red left-border CSS accent (`border-left: 3px solid var(--error)`) to make them visually distinct at a glance.
+- An **"Upload another file"** button appears directly on each failed row, allowing immediate retry without scrolling to the page header.
+- The processing status badge now includes an animated CSS spinner, making it visually clear that the document is actively being processed rather than stalled.
+- The upload-error banner (shown on immediate 422 rejection) includes an inline **"Try another file"** button instead of requiring the user to dismiss the error and manually click the upload button again.
+- Polling already stopped correctly on `"failed"` status (the condition was `status !== "processing"`), so no change was needed there — the frontend never gets stuck indefinitely.
+
+**Why show the backend message verbatim rather than map codes to frontend strings:** the backend already computes the correct, contextual message (e.g. including the actual page count vs. the limit). Duplicating that mapping in the frontend would mean maintaining two copies of the same strings. The `error_message` column was added precisely to be the canonical source of user-facing copy — the frontend just renders it.
+
+**Why include a retry CTA on the failed row itself (not just the header):** in a list with multiple documents, the user's attention is on the failed row. Making them scroll up to click "Upload PDF" again adds unnecessary friction. A local retry button on the failed row removes that indirection.

@@ -19,7 +19,7 @@ export default function CollectionDetailPage() {
   const [deletingId, setDeletingId] = useState(null);
 
   const fileInputRef = useRef(null);
-  const pollIntervals = useRef({}); // documentId -> intervalId, so we can stop polling once a doc is done
+  const pollIntervals = useRef({}); // documentId -> intervalId
 
   function startPolling(documentId) {
     if (pollIntervals.current[documentId]) return; // already polling this one
@@ -29,13 +29,16 @@ export default function CollectionDetailPage() {
         const updated = await api.getDocument(token, documentId);
         setDocuments((prev) => prev.map((d) => (d.id === documentId ? updated : d)));
 
+        // Stop polling when document reaches a terminal state.
+        // Both "ready" and "failed" are terminal — never leave polling
+        // running for a failed document or the user will be stuck forever.
         if (updated.status !== "processing") {
           clearInterval(pollIntervals.current[documentId]);
           delete pollIntervals.current[documentId];
         }
       } catch {
-        // Document lookup failed (e.g. deleted mid-poll) — stop polling rather
-        // than retry forever against something that's gone.
+        // Document lookup failed (e.g. deleted mid-poll) — stop polling
+        // rather than retry forever against something that's gone.
         clearInterval(pollIntervals.current[documentId]);
         delete pollIntervals.current[documentId];
       }
@@ -56,8 +59,7 @@ export default function CollectionDetailPage() {
       .listDocuments(token, collectionId)
       .then((docs) => {
         setDocuments(docs);
-        // Resume polling anything still processing from before a page refresh —
-        // otherwise a reload mid-ingestion would leave the status frozen.
+        // Resume polling anything still processing from before a page refresh.
         docs.forEach((d) => {
           if (d.status === "processing") startPolling(d.id);
         });
@@ -92,13 +94,18 @@ export default function CollectionDetailPage() {
     }
   }
 
+  function handleRetryUpload() {
+    // Clear any stale error banner and re-open the file picker.
+    setUploadError(null);
+    fileInputRef.current.click();
+  }
+
   async function handleDeleteDocument(documentId, filename) {
     const confirmed = window.confirm(`Delete "${filename}"? This can't be undone.`);
     if (!confirmed) return;
 
     // If this document was still being polled (mid-ingestion), stop that
-    // poll first — otherwise it'd keep hitting a document that no longer
-    // exists until the request itself starts failing.
+    // poll first — otherwise it'd keep hitting a document that no longer exists.
     if (pollIntervals.current[documentId]) {
       clearInterval(pollIntervals.current[documentId]);
       delete pollIntervals.current[documentId];
@@ -145,7 +152,20 @@ export default function CollectionDetailPage() {
         />
       </div>
 
-      {uploadError && <div className="error-banner">{uploadError}</div>}
+      {/* Upload error banner — shown when the server rejects the file
+          immediately (validation failure) or the upload request itself fails. */}
+      {uploadError && (
+        <div className="error-banner upload-error-banner">
+          <span className="upload-error-icon">⚠</span>
+          <span className="upload-error-text">{uploadError}</span>
+          <button
+            className="btn-secondary btn-compact upload-error-retry"
+            onClick={handleRetryUpload}
+          >
+            Try another file
+          </button>
+        </div>
+      )}
 
       {documents.length === 0 && (
         <p className="muted">No documents yet. Upload a PDF to start chatting with it.</p>
@@ -153,12 +173,48 @@ export default function CollectionDetailPage() {
 
       <div className="document-list">
         {documents.map((doc) => (
-          <div key={doc.id} className="document-row">
+          <div key={doc.id} className={`document-row${doc.status === "failed" ? " document-row--failed" : ""}`}>
             <span className="document-filename">{doc.filename}</span>
-            <span className={`status-badge status-${doc.status}`}>{doc.status}</span>
-            {doc.status === "ready" && (
-              <span className="mono muted-small">{doc.page_count} pages</span>
+
+            {doc.status === "processing" && (
+              <span className="status-badge status-processing">
+                <span className="processing-spinner" aria-hidden="true" />
+                Processing…
+              </span>
             )}
+
+            {doc.status === "ready" && (
+              <>
+                <span className="status-badge status-ready">Ready</span>
+                <span className="mono muted-small">{doc.page_count} pages</span>
+              </>
+            )}
+
+            {doc.status === "failed" && (
+              <span className="status-badge status-failed" title={doc.error_code ?? undefined}>
+                Failed
+              </span>
+            )}
+
+            {/* Failure details row — shown below the filename for failed docs */}
+            {doc.status === "failed" && (
+              <span className="document-error-message">
+                {doc.error_message ??
+                  "Processing failed. Please try uploading a different file."}
+              </span>
+            )}
+
+            {/* Retry action — only shown for failed documents */}
+            {doc.status === "failed" && (
+              <button
+                className="btn-secondary btn-compact document-retry-btn"
+                onClick={handleRetryUpload}
+                title="Upload a new file"
+              >
+                Upload another file
+              </button>
+            )}
+
             <button
               className="btn-icon-delete"
               onClick={() => handleDeleteDocument(doc.id, doc.filename)}

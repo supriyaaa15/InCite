@@ -1,7 +1,7 @@
 import enum
 import uuid
 
-from sqlalchemy import Enum, ForeignKey, Integer, String
+from sqlalchemy import Enum, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -26,6 +26,11 @@ class Document(TimestampedUUIDBase):
     status: Mapped[DocumentStatus] = mapped_column(
         Enum(DocumentStatus), default=DocumentStatus.processing, nullable=False
     )
+    # Set by the route handler (synchronous validation) or the ingestion service
+    # (background failure).  NULL means no failure has occurred yet, or the
+    # document completed successfully.
+    error_code: Mapped[str | None] = mapped_column(String, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     collection: Mapped["Collection"] = relationship(back_populates="documents")
     chunks: Mapped[list["Chunk"]] = relationship(

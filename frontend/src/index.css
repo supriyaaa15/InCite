@@ -330,16 +330,48 @@ a:focus-visible {
 .document-row {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 12px;
   padding: 14px 16px;
   background: var(--paper-raised);
   border: 1px solid var(--line);
   border-radius: 8px;
+  transition: border-color 0.15s ease;
+}
+
+/* Failed rows get a subtle left accent so they're visually distinct */
+.document-row--failed {
+  border-left: 3px solid var(--error);
+  background: #fff9f9;
 }
 
 .document-filename {
   flex: 1;
   font-size: 0.95rem;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Error message shown below the filename for failed docs */
+.document-error-message {
+  width: 100%;
+  font-size: 0.82rem;
+  color: var(--error);
+  line-height: 1.4;
+  padding-top: 2px;
+  /* Full-width so it wraps below the filename + badge row */
+  flex-basis: 100%;
+  order: 10;
+}
+
+/* Retry button inside a failed document row */
+.document-retry-btn {
+  font-size: 0.8rem;
+  padding: 5px 12px;
+  order: 11;
+  margin-left: auto;
 }
 
 .status-badge {
@@ -348,6 +380,10 @@ a:focus-visible {
   padding: 3px 10px;
   border-radius: 999px;
   text-transform: capitalize;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
 }
 
 .status-processing {
@@ -365,10 +401,58 @@ a:focus-visible {
   color: var(--error);
 }
 
+/* Spinner shown inside the "Processing…" badge */
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.processing-spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 2px solid #d4aa5c;
+  border-top-color: #8a6116;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+/* Upload error banner — extends the base error-banner with a retry action */
+.upload-error-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.upload-error-icon {
+  font-size: 1rem;
+  flex-shrink: 0;
+}
+
+.upload-error-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.upload-error-retry {
+  flex-shrink: 0;
+  font-size: 0.8rem;
+  padding: 5px 12px;
+  border-color: var(--error);
+  color: var(--error);
+}
+
+.upload-error-retry:hover {
+  background: var(--error-soft);
+  border-color: var(--error);
+}
+
 .page-header-actions {
   display: flex;
   gap: 8px;
 }
+
 
 .btn-secondary {
   width: auto;

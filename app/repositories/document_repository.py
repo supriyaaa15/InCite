@@ -33,11 +33,20 @@ def list_by_collection(db: Session, collection_id: uuid.UUID) -> list[Document]:
 
 
 def update_status(
-    db: Session, document: Document, status: DocumentStatus, page_count: int | None = None
+    db: Session,
+    document: Document,
+    status: DocumentStatus,
+    page_count: int | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
 ) -> Document:
     document.status = status
     if page_count is not None:
         document.page_count = page_count
+    if error_code is not None:
+        document.error_code = error_code
+    if error_message is not None:
+        document.error_message = error_message
     db.commit()
     db.refresh(document)
     return document

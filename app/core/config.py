@@ -56,6 +56,18 @@ class Settings(BaseSettings):
     # Storage
     UPLOAD_DIR: str = "./uploads"
 
+    # Upload validation limits — override via env vars in production.
+    # MAX_UPLOAD_SIZE_MB: hard cap on raw file size before any processing.
+    # MAX_PDF_PAGES: hard cap on page count, checked synchronously in the
+    # route handler so we never create an orphaned "processing" DB row.
+    MAX_UPLOAD_SIZE_MB: int = 20
+    MAX_PDF_PAGES: int = 800
+
+    @property
+    def max_upload_size_bytes(self) -> int:
+        """Derived convenience — avoids scattering * 1024 * 1024 everywhere."""
+        return self.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+
     # CORS — comma-separated list of allowed frontend origins. Defaults to
     # local Vite dev server; set to the real deployed frontend URL in
     # production (e.g. https://incite.vercel.app).

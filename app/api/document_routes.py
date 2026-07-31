@@ -1,3 +1,4 @@
+import logging
 import uuid
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, status
@@ -11,8 +12,12 @@ from app.schemas.document import DocumentResponse
 from app.services import collection_service, ingestion_service
 from app.services.collection_service import CollectionNotFoundError
 from app.services.storage_service import storage_service
+from app.utils.pdf_validator import validate_pdf_file, validate_upload
+from app.utils.upload_errors import UploadValidationError
 
 router = APIRouter(tags=["documents"])
+
+logger = logging.getLogger(__name__)
 
 
 @router.post(
@@ -34,14 +39,60 @@ def upload_document(
     except CollectionNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Collection not found")
 
+    # ------------------------------------------------------------------ #
+    # Phase 1 — cheap pre-save checks (size limit + MIME/ext hints).     #
+    # Runs before writing to disk so we don't waste I/O.                 #
+    # ------------------------------------------------------------------ #
+    try:
+        validate_upload(file)
+    except UploadValidationError as exc:
+        logger.warning(
+            "Upload rejected before save | user=%s collection=%s filename=%r "
+            "error_code=%s",
+            current_user.id,
+            collection_id,
+            file.filename,
+            exc.error_code,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=exc.user_message,
+        )
+
+    # ------------------------------------------------------------------ #
+    # Phase 2 — save to disk, then validate the actual file content.     #
+    # Keeping save-then-validate (rather than validate-then-save) means  #
+    # fitz works on a real path, not an in-memory stream.                #
+    # ------------------------------------------------------------------ #
     file_path = storage_service.save_file(str(current_user.id), str(collection_id), file)
+
+    try:
+        validate_pdf_file(file_path)
+    except UploadValidationError as exc:
+        # Delete the file we just saved — we don't want orphaned bytes on disk.
+        storage_service.delete_file(file_path)
+        logger.warning(
+            "Upload rejected after save | user=%s collection=%s filename=%r "
+            "error_code=%s",
+            current_user.id,
+            collection_id,
+            file.filename,
+            exc.error_code,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=exc.user_message,
+        )
+
+    # ------------------------------------------------------------------ #
+    # Phase 3 — file is valid.  Create the DB record and hand off to the #
+    # background ingestion task.  Returns immediately with                #
+    # status=processing; the frontend polls GET /documents/{id}.         #
+    # ------------------------------------------------------------------ #
     document = document_repository.create(
         db, collection_id=collection_id, filename=file.filename, file_path=file_path
     )
 
-    # Returns immediately with status=processing; chunking/embedding happens
-    # after the response is sent. The frontend polls GET /documents/{id}
-    # to find out when it flips to ready (or failed).
     background_tasks.add_task(ingestion_service.ingest_document, str(document.id))
 
     return document
