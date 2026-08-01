@@ -688,6 +688,56 @@ a:focus-visible {
   line-height: 1.4;
 }
 
+/* Follow-up question suggestions */
+.suggestions-section {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.suggestions-label {
+  display: block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--ink-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 8px;
+}
+
+.suggestions-chips {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.suggestion-chip {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 12px;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  color: var(--citation);
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+  white-space: normal;
+  line-height: 1.4;
+}
+
+.suggestion-chip:hover:not(:disabled) {
+  background: var(--citation-soft);
+  border-color: var(--citation);
+}
+
+.suggestion-chip:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .chat-input-row {
   display: flex;
   gap: 8px;

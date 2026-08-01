@@ -23,7 +23,8 @@ class ChatResponse(BaseModel):
     message: str
     reasoning: str
     citations: list[Citation]
-    confidence: str  # "none" | "low" | "high" — see chat_service.send_message
+    confidence: str  # "none" | "low" | "medium" | "high" | "error"
+    follow_up_questions: list[str] = []  # empty list = not generated or generation failed
 
 
 class ChatSessionResponse(BaseModel):

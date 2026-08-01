@@ -12,7 +12,7 @@ from app.services import collection_service, retrieval_service
 
 import logging
 
-logger = logging.getLogger(__name__) 
+logger = logging.getLogger(__name__)
 
 
 class ChatSessionNotFoundError(Exception):
@@ -32,18 +32,38 @@ class SessionCollectionMismatchError(Exception):
 
 class AnswerWithReasoning(BaseModel):
     """
-    Schema for structured LLM output. Passed to with_structured_output()
+    Schema for structured LLM output.  Passed to with_structured_output()
     (Day 14-15) — LangChain handles the JSON-mode request, schema
     enforcement, and parsing that Day 12-13 did by hand with
     response_mime_type + json.loads. This is the actual "what does
     LangChain abstract" answer for this project: about 30 lines of manual
     JSON handling collapsed into one method call.
+
+    follow_up_questions was added (Day 33 refactor) to collapse what was
+    previously a separate second LLM call into the same structured
+    response.  The field is optional with an empty-list default so that:
+    - existing callers that don't read it are unaffected
+    - the plain-text fallback path in _try_model can return [] without
+      breaking the schema contract
+    - a model that omits or misformats the field degrades gracefully to
+      no suggestions rather than crashing
     """
 
     answer: str = Field(description="The answer to the question, reasoned from the given context.")
     reasoning: str = Field(
         description="One short sentence naming which page(s) and document(s) "
         "the answer draws from and what they cover."
+    )
+    follow_up_questions: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Exactly 3 concise follow-up questions that help the user explore the documents further. "
+            "Ground every question strictly in the retrieved context — do not hallucinate topics. "
+            "Prefer questions that encourage deeper understanding, comparisons between concepts, "
+            "summaries of related sections, or practical applications of what was discussed. "
+            "Avoid repeating the user's question and avoid generic questions like 'Tell me more'. "
+            "Return an empty list if no meaningful grounded questions can be generated."
+        ),
     )
 
 
@@ -86,13 +106,18 @@ def delete_session(db: Session, user_id: uuid.UUID, session_id: uuid.UUID) -> No
     chat_repository.delete_session(db, session)
 
 
-def _try_model(model_name: str, prompt: str) -> tuple[str, str]:
+def _try_model(model_name: str, prompt: str) -> tuple[str, str, list[str]]:
     """
     One attempt against one model. Tries structured output first; if that
     fails to parse (not necessarily an API error — could just be the
     model not returning valid JSON), falls back to a plain call for this
     same model before giving up on it. Whatever exception surfaces here
     is what _invoke_with_fallback classifies as quota/transient/other.
+
+    Returns (answer, reasoning, follow_up_questions).
+    follow_up_questions is [] on the plain-text fallback path — there's
+    no reliable way to extract a list from unstructured text, so we
+    degrade gracefully to no suggestions rather than parsing heuristically.
     """
     llm = get_llm(model_name)
     try:
@@ -102,7 +127,8 @@ def _try_model(model_name: str, prompt: str) -> tuple[str, str]:
         reasoning = result.reasoning.strip()
         if not answer:
             raise ValueError("model returned an empty answer")
-        return answer, reasoning
+        follow_up_questions = _validate_followups(result.follow_up_questions)
+        return answer, reasoning, follow_up_questions
     except Exception as structured_error:
         if _is_quota_error(structured_error) or _is_transient_error(structured_error):
             raise  # a real API problem — let the fallback chain handle it, don't mask it with a retry
@@ -110,20 +136,41 @@ def _try_model(model_name: str, prompt: str) -> tuple[str, str]:
         content = response.content.strip()
         if not content:
             raise ValueError("model returned an empty response")
-        return content, ""  # no structured reasoning from a plain call
+        return content, "", []  # no structured reasoning or follow-ups from a plain call
 
 
-def _invoke_with_fallback(prompt: str) -> tuple[str | None, str | None, str]:
+def _validate_followups(raw: list[str]) -> list[str]:
+    """
+    Normalise the follow_up_questions list returned by the structured LLM
+    call: strip whitespace, discard empty strings, deduplicate (preserving
+    order), cap at 3.  Never raises — called from _try_model where any
+    exception surfaces to the fallback chain.
+    """
+    seen: set[str] = set()
+    result: list[str] = []
+    for q in raw:
+        q = q.strip()
+        if not q:
+            continue
+        lower = q.lower()
+        if lower not in seen:
+            seen.add(lower)
+            result.append(q)
+    return result[:3]
+
+
+def _invoke_with_fallback(prompt: str) -> tuple[str | None, str | None, list[str], str]:
     """
     Tries LLM_MODEL first, then each of LLM_FALLBACK_MODELS in order.
     One retry per model for transient errors (503, timeout) with a short
     backoff; quota errors (429/RESOURCE_EXHAUSTED) skip straight to the
     next model, since retrying the same exhausted model can't help.
 
-    Returns (answer, reasoning, model_used). answer is None only if every
-    model in the chain failed — the caller is responsible for turning
-    that into a user-facing message, this function never raises for an
-    exhausted chain.
+    Returns (answer, reasoning, follow_up_questions, model_used).
+    answer is None only if every model in the chain failed — the caller
+    is responsible for turning that into a user-facing message, this
+    function never raises for an exhausted chain.
+    follow_up_questions is [] on any failure or plain-text fallback.
     """
     models_to_try = [settings.LLM_MODEL] + [
         m.strip() for m in settings.LLM_FALLBACK_MODELS.split(",") if m.strip()
@@ -133,8 +180,8 @@ def _invoke_with_fallback(prompt: str) -> tuple[str | None, str | None, str]:
         logger.warning(f"Trying model: {model_name}")
         for attempt in range(2):
             try:
-                answer, reasoning = _try_model(model_name, prompt)
-                return answer, reasoning, model_name
+                answer, reasoning, follow_up_questions = _try_model(model_name, prompt)
+                return answer, reasoning, follow_up_questions, model_name
             except Exception as e:
                 logger.warning(f"{model_name} failed: {e}")
                 if _is_quota_error(e):
@@ -144,7 +191,7 @@ def _invoke_with_fallback(prompt: str) -> tuple[str | None, str | None, str]:
                     continue
                 break  # unrecognized error, or out of retries — try the next model anyway
 
-    return None, None, ""
+    return None, None, [], ""
 
 
 def _fallback_reasoning(citations: list[dict]) -> str:
@@ -184,16 +231,23 @@ def _no_confidence_answer() -> tuple[str, str]:
 
 def _generate_answer(
     question: str, citations: list[dict], history: list[dict]
-) -> tuple[str, str, str]:
+) -> tuple[str, str, list[str], str]:
     """
-    Returns (answer, reasoning, model_used). citations here are already
-    filtered (filter_citations() has run in send_message before this is
-    called) — every chunk weak enough to be noise has already been
-    removed, so everything reaching the prompt is something worth
-    answering from. history is prior turns in this session
-    ([{role, content}, ...], oldest first, current question NOT
-    included) — without it, a follow-up like "why is it used" has no way
-    to resolve what "it" refers to.
+    Returns (answer, reasoning, follow_up_questions, model_used).
+
+    citations here are already filtered (filter_citations() has run in
+    send_message before this is called) — every chunk weak enough to be
+    noise has already been removed, so everything reaching the prompt is
+    something worth answering from.
+
+    history is prior turns in this session ([{role, content}, ...],
+    oldest first, current question NOT included) — without it, a
+    follow-up like "why is it used" has no way to resolve what "it" refers
+    to.
+
+    follow_up_questions is populated from the same structured LLM call as
+    the answer — no second API request.  See design-decisions.md (Day 33
+    refactor) for why this collapsed from two calls to one.
     """
     history_block = ""
     if history:
@@ -228,12 +282,19 @@ unicode symbols (e.g. "U, V transpose, and a diagonal matrix Σ") — do NOT
 use LaTeX syntax (no dollar signs, no backslash-commands like \\Sigma or
 \\sqrt). The person reading this cannot render LaTeX.
 
+After answering, also generate follow_up_questions: exactly 3 questions
+that help the user explore the uploaded documents further. Prefer questions
+that encourage deeper understanding, comparisons between concepts,
+summaries of related topics, or practical applications. Avoid repeating the
+user's question, avoid generic questions like "Tell me more", and do not
+suggest questions about information absent from the retrieved context.
+
 Context:
 {context}
 
 Question: {question}"""
 
-    answer, reasoning, model_used = _invoke_with_fallback(prompt)
+    answer, reasoning, follow_up_questions, model_used = _invoke_with_fallback(prompt)
 
     if answer is None:
         # Every model in the fallback chain failed — most likely every
@@ -243,12 +304,24 @@ Question: {question}"""
             "The AI service has reached its daily quota. Please try again later.",
             "No answer could be generated — every configured AI model is "
             "currently unavailable or has reached its quota.",
+            [],
             "",
         )
 
     if not reasoning:
         reasoning = _fallback_reasoning(citations)
-    return answer, reasoning, model_used
+    return answer, reasoning, follow_up_questions, model_used
+
+
+# Recovery suggestions for the low-confidence path (confidence == "none"):
+# retrieval found nothing to ground the LLM on, so there's no answer to
+# build grounded follow-ups from.  These static questions help the user
+# discover what's in their collection instead.
+_RECOVERY_QUESTIONS = [
+    "What topics are covered in the uploaded documents?",
+    "Can you summarize what these documents are about?",
+    "What are the main concepts discussed in these documents?",
+]
 
 
 def send_message(
@@ -257,20 +330,23 @@ def send_message(
     collection_id: uuid.UUID,
     message_text: str,
     session_id: uuid.UUID | None,
-) -> tuple[ChatSession, str, str, list[dict], str]:
+) -> tuple[ChatSession, str, str, list[dict], str, list[str]]:
     """
     The full chat flow: verify ownership, get/create the session, retrieve
-    relevant chunks, generate a grounded answer + reasoning, persist
-    everything (both messages + a query log), return what the route needs.
-    Retrieval itself is delegated to retrieval_service — this function only
-    orchestrates the conversation around it.
+    relevant chunks, generate a grounded answer + reasoning + follow-up
+    questions in a single LLM call, persist everything, return what the
+    route needs.  Retrieval itself is delegated to retrieval_service —
+    this function only orchestrates the conversation around it.
 
-    Returns (session, answer, reasoning, public_citations, confidence).
+    Returns (session, answer, reasoning, public_citations, confidence,
+    follow_up_questions).
     confidence is "none" (nothing cleared the noise filter, LLM never
     called), "error" (retrieval found something, but every configured LLM
     failed/hit quota), "low" or "medium" or "high" (based on the best
     surviving citation score against MEDIUM_CONFIDENCE_THRESHOLD and
     HIGH_CONFIDENCE_THRESHOLD).
+    follow_up_questions is [] if generation failed, or _RECOVERY_QUESTIONS
+    when confidence is "none".
     """
     collection_service.get_owned_collection(db, user_id, collection_id)
 
@@ -305,8 +381,14 @@ def send_message(
     if not filtered_citations:
         answer, reasoning = _no_confidence_answer()
         confidence = "none"
+        # No context → no grounded follow-ups from the LLM.
+        # Return static recovery questions to help the user discover
+        # what's in their collection instead.
+        follow_up_questions = _RECOVERY_QUESTIONS[:]
     else:
-        answer, reasoning, model_used = _generate_answer(message_text, filtered_citations, history)
+        answer, reasoning, follow_up_questions, model_used = _generate_answer(
+            message_text, filtered_citations, history
+        )
         top_score = max(c["score"] for c in filtered_citations)
         if not model_used:
             # retrieval succeeded but every LLM in the chain failed —
@@ -345,9 +427,9 @@ def send_message(
         similarity_scores=[c["score"] for c in citations],
         top_k=settings.TOP_K,
         response_time_ms=retrieval_time_ms + llm_time_ms,
-        llm_model=model_used or settings.LLM_MODEL,  # log which model actually
-        # answered, not just the configured primary — this is the whole
-        # point of the fallback chain being observable, not a black box
+        llm_model=model_used or settings.LLM_MODEL,  # log which model actually answered,
+        # not just the configured primary — this is the whole point of the
+        # fallback chain being observable, not a black box
     )
 
-    return session, answer, reasoning, public_citations, confidence
+    return session, answer, reasoning, public_citations, confidence, follow_up_questions

@@ -1017,3 +1017,191 @@ Decision: three more requested features (upload size/count limits, malformed-PDF
 **Why show the backend message verbatim rather than map codes to frontend strings:** the backend already computes the correct, contextual message (e.g. including the actual page count vs. the limit). Duplicating that mapping in the frontend would mean maintaining two copies of the same strings. The `error_message` column was added precisely to be the canonical source of user-facing copy — the frontend just renders it.
 
 **Why include a retry CTA on the failed row itself (not just the header):** in a list with multiple documents, the user's attention is on the failed row. Making them scroll up to click "Upload PDF" again adds unnecessary friction. A local retry button on the failed row removes that indirection.
+
+---
+
+## [Day 33] Context-aware follow-up question suggestions
+
+**Problem:** after receiving an answer, users often don't know what to ask next. The chat interface was passive — it answered what was asked, but gave no guidance on what else the documents contained or how to explore further. This is a discovery problem: the documents may cover five interesting topics but the user only knows to ask about one.
+
+---
+
+### Decision 1 — follow-up generation is a separate function, not an extension of `AnswerWithReasoning`
+
+**What changed:** added `_generate_followup_questions(question, answer, citations, confidence)` as a private function in `chat_service.py`. It is called by `send_message()` after the main answer has been generated and persisted, and it returns `list[str]`.
+
+**The alternative considered — extend `AnswerWithReasoning`:**
+The existing answer generation already uses `with_structured_output(AnswerWithReasoning)` (a LangChain structured output call). Adding `follow_up_questions: list[str]` to that Pydantic model would have put everything in one LLM call and zero extra latency.
+
+**Why that was rejected:**
+
+1. **Failure isolation.** The requirement says "never fail the chat request because follow-up generation failed." With a shared schema, any malformed output in the `follow_up_questions` field can cause `with_structured_output()` to fall back to a plain LLM call, which loses *both* the reasoning field and the follow-up questions simultaneously. With a separate call, a follow-up failure touches nothing — it's wrapped in `try/except` that returns `[]` and logs the exception.
+
+2. **Single-responsibility.** `AnswerWithReasoning` is the contract between the answer generation prompt and the response parser. Adding follow-up questions to it couples two concerns that are otherwise independent: answering the question, and suggesting next questions. If follow-up generation is later removed, changed (e.g. server-side rendering vs. client-side), or replaced with a different mechanism, `AnswerWithReasoning` must change too.
+
+3. **Prompt clarity.** One prompt with two jobs — generate an answer AND generate follow-up questions — is harder to tune. The answer prompt is carefully worded around grounding, mathematical notation, and historical reasoning about retrieval behaviour. Adding follow-up generation instructions to it would make the prompt longer and harder to reason about.
+
+4. **Extensibility.** A separate function is easy to replace: mock it in tests, A/B test a different prompt, swap it for a rule-based generator, or run it asynchronously in the future — none of those changes touch answer generation.
+
+**Why the extra latency is acceptable:** follow-up questions are displayed below the completed response. By the time they render, the user is already reading the answer. The additional call (typically 0.5–1.5 seconds) is not on the critical path of the answer. If it times out or fails, the user still has a complete answer; they just don't see suggestions.
+
+---
+
+### Decision 2 — plain text response, not structured output, for follow-up generation
+
+**What changed:** `_generate_followup_questions` calls `_invoke_with_fallback(prompt)` directly, which returns plain text. The response is then parsed by splitting on newlines and stripping list prefixes (`1.`, `1)`, `-`, `•`, etc.).
+
+**Why not `with_structured_output()`:** the structured output mechanism adds schema enforcement overhead and is primarily valuable when the output has multiple named fields with types. A list of three short strings doesn't benefit from that. A plain prompt instruction ("Return ONLY the 3 questions, numbered 1. 2. 3.") is reliable enough for this case, and plain-text parsing is trivially robust to minor formatting variations (numbered vs. bulleted vs. dash-prefixed lists).
+
+---
+
+### Decision 3 — confidence-aware generation with two distinct paths
+
+**What changed:** `_generate_followup_questions` checks the `confidence` parameter before doing anything:
+
+- `confidence == "none"` (nothing cleared the noise filter — the LLM was never called): returns `_RECOVERY_QUESTIONS`, a fixed list of three generic discovery questions ("What topics are covered?", "Summarize the uploaded documents.", "What are the main concepts?"). No LLM call.
+- All other confidence levels: makes the full LLM call with the actual question, answer, and document excerpts.
+
+**Why different paths:** when `confidence == "none"`, the retrieval system found no relevant content. Asking the LLM to generate "grounded" follow-up questions in this situation is contradictory — there is no grounding. The LLM would either hallucinate topics that don't exist in the documents, or produce generic questions identical to the recovery list anyway. The deterministic path is both faster and more honest.
+
+**Why `_RECOVERY_QUESTIONS` are copy-of-slice (`[:]`):** the list is a module-level constant. Returning a copy prevents any caller from accidentally mutating the shared list (unlikely in practice, but correct by construction).
+
+---
+
+### Decision 4 — follow-up generation runs AFTER the assistant message is committed to the database
+
+**What changed:** in `send_message()`, the call order is:
+
+```
+_generate_answer()          ← answer + reasoning + model_used
+to_public()                 ← public citations
+create_message(assistant)   ← DB commit
+query_log_repository.create ← DB commit
+_generate_followup_questions() ← AFTER both commits
+return (..., follow_up_questions)
+```
+
+**Why after the commit:** if follow-up generation fails or raises an exception, the assistant message and query log are already safely written. There is no transaction to roll back. The follow-up questions are ephemeral — they are returned in the API response but not persisted to the database (they are regenerated on each new request). If they fail, the user receives the full answer with an empty `follow_up_questions` list.
+
+**Why not persist follow-up questions:** the questions are context-specific to the moment they were generated (the specific answer, the specific retrieved chunks). Persisting them and re-displaying them when a session is resumed would show stale questions — the user's context has changed. The cleaner model is: suggestions are live-only, generated fresh with each response.
+
+---
+
+### Decision 5 — the prompt design
+
+The follow-up prompt instructs the model to:
+- Stay grounded in what the documents "actually contain" (not what the model generally knows about the topic)
+- Be specific, not generic (explicitly gives a bad example: "Can you explain more?")
+- Not repeat the original question
+- Not introduce topics not present in the documents
+- Return exactly three numbered questions with no preamble
+
+The context sent to the model is limited to the first 200 characters of each of the top 5 retrieved chunks (`citations[:5]`). This is intentional: the full chunk text is used for the answer prompt (where the model needs the complete context), but for follow-up suggestions, a brief excerpt per chunk is sufficient to anchor the questions in document content without bloating the prompt.
+
+---
+
+### Decision 6 — validation and cleanup of the parsed response
+
+**What changed:** after splitting the LLM response into lines and stripping prefixes, the code:
+1. Removes empty lines.
+2. Deduplicates (case-insensitive, preserving order).
+3. Takes at most 3 (`unique[:3]`).
+4. Logs a warning if fewer than 3 survive (doesn't raise).
+
+**Why not enforce exactly 3 by padding:** if the model returns 2 questions instead of 3, padding with a fake third question would be worse than showing 2 good ones. The frontend renders however many arrive (0–3). A warning log is the right signal: it tells the operator the model didn't follow the instruction, without degrading the user's experience with a synthetic question.
+
+---
+
+### Decision 7 — frontend: suggestion chips trigger immediate send, not just input fill
+
+**What changed:** `handleSuggestionClick(question)` directly runs the full send flow — it does not just populate the input box and wait for the user to press Enter. This mirrors the requirement: "behave exactly like the user typed the question."
+
+**Why immediate send:** filling the input and waiting requires the user to perform one more action (press Send), which adds friction and breaks the "one click to explore" pattern. The immediate send is more consistent with how suggestion chips work in search engines and chat assistants.
+
+**Why `handleSuggestionClick` is a standalone function rather than calling `handleSubmit`:** `handleSubmit` reads from the React `input` state, which is asynchronous — `setInput(question)` followed immediately by `handleSubmit()` would read the old input value, not the new one. The standalone function passes the question text directly as a local variable, avoiding the state timing problem.
+
+---
+
+### Extensibility notes (updated after Day 33 refactor)
+
+- **Conversation memory:** follow-up generation now runs inside `_generate_answer`, which already receives `history`. Multi-turn-aware suggestions can be added by referencing `history` inside the follow-up instruction block in the prompt — no architectural change needed.
+- **Agentic workflows:** the suggestion chips remain an entry point for agent-style "what to explore next" reasoning. Logic to filter suggestions based on topics already covered in the session can be added in `_validate_followups()` or in `send_message()` without touching retrieval or the LLM call itself.
+- **Async generation:** the single-call architecture makes async generation harder to do selectively (the answer and follow-ups come back together), but also means the async complexity is no longer necessary — the follow-up latency is zero because it's part of the same call.
+
+---
+
+## [Day 33 — Architecture Revision] Collapse follow-up generation into a single LLM call
+
+**Problem:** the Day 33 implementation made two sequential LLM calls per chat message — one for the answer + reasoning, one for the follow-up questions. On the Gemini free tier, this doubled quota consumption. After several chat exchanges, the follow-up generation call started hitting 429 RESOURCE_EXHAUSTED errors because the primary answer calls had already consumed the per-minute token budget. Users saw the answer rendered correctly but suggestions silently disappeared — a confusing experience.
+
+The root cause was an architectural constraint from the original isolation principle ("follow-up generation failure must never affect the answer"), which was correctly stated but over-implemented: the isolation only required that a failed follow-up call not propagate as an error to the user, not that it had to be a completely separate API request.
+
+---
+
+### Decision — merge follow-up generation into the existing structured output call
+
+**What changed:**
+
+1. **`AnswerWithReasoning`** gained a third field:
+   ```python
+   follow_up_questions: list[str] = Field(
+       default_factory=list,
+       description="Exactly 3 concise follow-up questions..."
+   )
+   ```
+   The field is `default_factory=list` so it degrades to `[]` if the model omits or misformats it — no schema rejection.
+
+2. **The answer prompt** now includes a follow-up instruction block after the answer instructions:
+   ```
+   After answering, also generate follow_up_questions: exactly 3 questions
+   that help the user explore the uploaded documents further. Prefer deeper
+   understanding, comparisons, summaries, practical applications. Avoid
+   repeating the question. Return an empty list if no grounded questions
+   can be generated.
+   ```
+   The instruction lives at the end of the prompt so it doesn't interfere with the answer quality.
+
+3. **`_try_model()`** now returns `tuple[str, str, list[str]]` — answer, reasoning, follow_up_questions — all from the same `result` object. The plain-text fallback path returns `[]` for follow-up questions (no reliable way to extract a list from unstructured text).
+
+4. **`_invoke_with_fallback()`** return type expanded to `tuple[str | None, str | None, list[str], str]`.
+
+5. **`_generate_answer()`** return type expanded to `tuple[str, str, list[str], str]`.
+
+6. **`send_message()`** reads follow-up questions directly from `_generate_answer()` instead of calling a separate function after the DB commit.
+
+**Deleted entirely:**
+- `FollowUpQuestions` Pydantic model (separate schema for the second call)
+- `_generate_followup_questions()` function (second LLM call + validation logic)
+- The post-commit follow-up call block in `send_message()`
+- The `low_confidence: bool` parameter and call-site translation `(confidence == "none")`
+
+The `_RECOVERY_QUESTIONS` list and the confidence-check for the "none" path are retained, now handled inline in `send_message()` in the `if not filtered_citations:` branch.
+
+**`_validate_followups()`** is a new small helper that the `_try_model` path calls to normalise the follow-up list: strip whitespace, discard empty strings, deduplicate (preserving order), cap at 3.  Extracted from what was the body of `_generate_followup_questions` so it's reusable without carrying the rest of the function.
+
+---
+
+### Why this doesn't compromise the isolation guarantee
+
+The original isolation requirement was: "follow-up generation failure must never fail the chat request." That guarantee is still upheld:
+
+- `_validate_followups()` never raises — it only iterates a list and returns a filtered copy.
+- If the model omits `follow_up_questions` entirely, Pydantic sets it to `[]` via `default_factory`.
+- If the structured output call fails entirely (`_try_model` falls back to the plain-text path), follow-up questions come back as `[]` — the answer is still returned, the session is still persisted, the user never sees an error.
+- The confidence == "none" path bypasses the LLM entirely and still returns recovery questions — no change from before.
+
+The only thing that changed is where follow-up generation happens: inside the existing LLM call, not after it.
+
+---
+
+### Impact
+
+| Metric | Before (two calls) | After (one call) |
+|---|---|---|
+| API requests per chat message | 2 | 1 |
+| Quota consumption | 2× | 1× |
+| Follow-up latency | Answer latency + follow-up latency | Answer latency only (parallel) |
+| Failure modes | Answer can succeed while follow-up fails | Both succeed or both fail together |
+| Code surface | ~90 lines across 3 functions + 1 class | ~15 lines across `_validate_followups` + field |
+
+The ~50% reduction in API requests directly addresses the Gemini free-tier quota exhaustion that caused follow-up suggestions to silently disappear after several chat exchanges.

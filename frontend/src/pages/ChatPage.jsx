@@ -109,6 +109,7 @@ export default function ChatPage() {
           reasoning: res.reasoning,
           citations: res.citations,
           confidence: res.confidence,
+          followUpQuestions: res.follow_up_questions ?? [],
         },
       ]);
 
@@ -124,6 +125,50 @@ export default function ChatPage() {
       setError(err.message);
       // Roll back the optimistic user message — it was never actually
       // answered, so leaving it in place would misrepresent the history.
+      setMessages((prev) => prev.slice(0, -1));
+    } finally {
+      setSending(false);
+    }
+  }
+
+  // Clicking a suggestion chip behaves exactly like the user typing the
+  // question and pressing Send — sets input, then immediately submits.
+  async function handleSuggestionClick(question) {
+    if (sending) return;
+    setInput(question);
+    // We need the input value in handleSubmit, but setInput is async.
+    // Simulate the submit directly with the question text.
+    const text = question.trim();
+    if (!text) return;
+
+    const wasNewSession = sessionId === null;
+    setError(null);
+    setInput("");
+    setMessages((prev) => [...prev, { role: "user", content: text }]);
+    setSending(true);
+
+    try {
+      const res = await api.sendMessage(token, collectionId, text, sessionId);
+      setSessionId(res.session_id);
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: res.message,
+          reasoning: res.reasoning,
+          citations: res.citations,
+          confidence: res.confidence,
+          followUpQuestions: res.follow_up_questions ?? [],
+        },
+      ]);
+      if (wasNewSession) {
+        setSessions((prev) => [
+          { id: res.session_id, collection_id: collectionId, title: text.slice(0, 60), created_at: new Date().toISOString() },
+          ...prev,
+        ]);
+      }
+    } catch (err) {
+      setError(err.message);
       setMessages((prev) => prev.slice(0, -1));
     } finally {
       setSending(false);
@@ -214,6 +259,30 @@ export default function ChatPage() {
                     ))}
                   </div>
                 )}
+
+                {/* Follow-up suggestion chips — only for assistant messages,
+                    only when not loading, only when the API returned questions */}
+                {m.role === "assistant" &&
+                  !sending &&
+                  m.followUpQuestions &&
+                  m.followUpQuestions.length > 0 && (
+                    <div className="suggestions-section">
+                      <span className="suggestions-label">Suggested questions</span>
+                      <div className="suggestions-chips">
+                        {m.followUpQuestions.map((q, qi) => (
+                          <button
+                            key={qi}
+                            className="suggestion-chip"
+                            onClick={() => handleSuggestionClick(q)}
+                            disabled={sending}
+                            title={q}
+                          >
+                            {q}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
               </div>
             ))}
 

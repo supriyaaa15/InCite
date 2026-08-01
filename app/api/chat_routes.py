@@ -22,7 +22,7 @@ def send_message(
     db: Session = Depends(get_db),
 ):
     try:
-        session, answer, reasoning, citations, confidence = chat_service.send_message(
+        session, answer, reasoning, citations, confidence, follow_up_questions = chat_service.send_message(
             db,
             user_id=current_user.id,
             collection_id=collection_id,
@@ -45,6 +45,7 @@ def send_message(
         reasoning=reasoning,
         citations=citations,
         confidence=confidence,
+        follow_up_questions=follow_up_questions,
     )
 
 
