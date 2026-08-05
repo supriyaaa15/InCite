@@ -1205,3 +1205,124 @@ The only thing that changed is where follow-up generation happens: inside the ex
 | Code surface | ~90 lines across 3 functions + 1 class | ~15 lines across `_validate_followups` + field |
 
 The ~50% reduction in API requests directly addresses the Gemini free-tier quota exhaustion that caused follow-up suggestions to silently disappear after several chat exchanges.
+
+---
+
+## [Day 34] Document Recommendation & Cross-Document Comparison
+
+### Goal
+
+Transform the assistant from a document Q&A chatbot into an intelligent study assistant that can answer questions, recommend the best document for a given learning goal, and compare explanations across documents — all through the same chat interface, without the user switching modes.
+
+---
+
+### Architecture: intent-first branching inside `send_message`
+
+```
+classify_intent()   ->   QUESTION | RECOMMEND | COMPARE
+      |
+retrieval_service.retrieve()   (top_k varies by intent)
+      |
+QUESTION  -> _generate_answer()        (existing path, unchanged)
+RECOMMEND -> comparison_service.recommend()
+COMPARE   -> comparison_service.compare()
+      |
+ONE structured LLM call (regardless of intent)
+      |
+ChatResponse
+```
+
+This preserves the quota budget: exactly 1 LLM call per user message for all three intents, consistent with the Day 33 follow-up question refactor.
+
+---
+
+### Why `comparison_service.py` is isolated
+
+1. **Cognitive separation.** `chat_service` already has ~200 lines of LLM orchestration. Adding per-document grouping, chunk capping, document name resolution, and two distinct prompt templates into the same file would make it unmaintainable.
+
+2. **Testability.** `comparison_service` is a pure function module — it takes pre-retrieved citations and returns structured results. No dependency on session state, DB writes, or the HTTP layer.
+
+3. **Future extensibility.** Reranking, hybrid search, or an LLM-based intent classifier can be added without touching `comparison_service`. The retrieval contract (`citations: list[dict]`) is stable.
+
+`comparison_service` does NOT call `retrieval_service.retrieve()` — retrieval remains in `send_message`, which passes pre-retrieved citations down, the same way `_generate_answer` receives pre-retrieved citations rather than fetching its own.
+
+---
+
+### Intent classification: rule-based, 0 API calls
+
+An LLM intent classifier adds 1 API call to every user message — ~80% of which are plain questions. Rule-based keyword matching is O(n) in keyword count, instant, and sufficient for the concrete intent signals this feature targets.
+
+COMPARE is checked before RECOMMEND to handle phrases like "which is better between X and Y". QUESTION is the safe default — misclassification degrades to a normal RAG answer, not an error.
+
+`classify_intent` accepts `history` for future use (e.g. follow-up intent detection in multi-turn conversations) but currently classifies from the current message only.
+
+---
+
+### Retrieval fairness for RECOMMEND: `_cap_per_document`
+
+RECOMMEND and COMPARE use `top_k = 30` for broader coverage. However, a single dominant document can still occupy most of the top-30 result set (e.g. 25 of 30 slots), leaving other documents with almost no representation in the LLM prompt.
+
+Fix: `_group_by_document()` groups chunks by document, then `_cap_per_document(n=5)` keeps the top 5 chunks per document by score. Every document gets up to 5 representative chunks in the LLM prompt regardless of how cosine scores distribute across the full result set. COMPARE does not need this cap — it filters to target documents explicitly.
+
+---
+
+### Dynamic suitability labels (not a fixed taxonomy)
+
+Fixed labels ("Best for learning", "Best for interview prep") assume the user's goal fits a predefined category. Instead, the LLM is instructed to infer the user's specific goal and derive a label that directly reflects it:
+
+- "I want examples" -> "Best examples", "Most theoretical"
+- "interview prep" -> "Best interview prep", "Best quick revision"
+- "detailed" -> "Most comprehensive", "Best for depth"
+
+The `suitability_label` field description explicitly says "Do NOT use a fixed label set — infer from the request." This is enforced at the prompt level.
+
+---
+
+### Conversation context for COMPARE: explicit > implicit > clarification
+
+`_resolve_target_documents` implements a three-priority resolution:
+
+1. **Explicit**: filename substrings present in the message.
+2. **Implicit**: message contains a reference word ("both", "the first two") AND the last assistant message named >=2 distinct documents.
+3. **Unresolvable**: return None -> clarification message listing available documents.
+
+The function never guesses. A wrong comparison produces a confident-sounding but irrelevant structured response — worse than a clarification request.
+
+---
+
+### Confidence field: `str | None = None`
+
+The existing confidence vocabulary (`"none"`, `"low"`, `"medium"`, `"high"`, `"error"`) represents retrieval similarity score quality. For RECOMMEND and COMPARE, no per-chunk score threshold is computed. Setting `confidence = "high"` would mislead; inventing `"n/a"` pollutes a field with a specific existing vocabulary.
+
+Resolution: `confidence: str | None = None` on `ChatResponse`. `None` is falsy in JavaScript — the existing frontend guard `{m.confidence && m.confidence !== "high" && ...}` already short-circuits with no code change needed.
+
+---
+
+### Single-document collections: natural message, not silent fallback
+
+When the collection has fewer than 2 ready documents, a natural explanation is returned:
+
+- RECOMMEND: "Only one document is currently ready in this collection. Upload additional documents to receive recommendations across multiple sources."
+- COMPARE: "Comparing documents requires at least two ready documents in this collection. Upload another document to use this feature."
+
+Falling back to QUESTION would produce a confusing answer when the user explicitly asked for a recommendation or comparison.
+
+---
+
+### API: additive only
+
+Two new optional fields on `ChatResponse`:
+- `recommended_documents: list[RecommendedDocument] = []`
+- `comparison_sections: list[ComparisonSection] = []`
+
+Both default to `[]`. `message` is always populated as a plain-text summary regardless of intent — the chat thread always renders readable text even if a client does not process the structured fields.
+
+---
+
+### Future extension points
+
+- **Hybrid Search / Reranking**: plugging in to `retrieval_service.retrieve()` benefits all three intents automatically.
+- **OCR**: scanned documents will contribute to recommendations and comparisons once OCR is added to ingestion — no comparison_service changes needed.
+- **More intents**: adding `SUMMARIZE`, `QUIZ`, or `OUTLINE` requires a new phrase set, enum value, generator function, and branch in `send_message`. The scaffold does not change.
+- **LLM intent classifier**: `classify_intent` can be replaced without changing any other code — the function signature and return type are stable.
+- **Agentic workflows**: the typed `recommended_documents` and `comparison_sections` fields are structured entry points for a future agent that could act on recommendations rather than just displaying them.

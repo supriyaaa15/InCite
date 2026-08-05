@@ -738,6 +738,126 @@ a:focus-visible {
   cursor: not-allowed;
 }
 
+/* ── Document Recommendation cards ─────────────────────────────────────── */
+.recommendations-section {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.recommendations-label {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--ink-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 10px;
+}
+
+.recommendation-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.recommendation-card {
+  padding: 10px 13px;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  transition: border-color 0.15s;
+}
+
+.recommendation-card:hover {
+  border-color: var(--citation);
+}
+
+.recommendation-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.recommendation-rank {
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--citation);
+  background: var(--citation-soft);
+  border-radius: 4px;
+  padding: 1px 6px;
+  flex-shrink: 0;
+}
+
+.recommendation-doc-name {
+  font-weight: 600;
+  font-size: 0.86rem;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.recommendation-label {
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: var(--citation);
+  margin-bottom: 4px;
+}
+
+.recommendation-reason {
+  margin: 0;
+  font-size: 0.81rem;
+  color: var(--ink-soft);
+  line-height: 1.45;
+}
+
+/* ── Cross-document Comparison sections ─────────────────────────────────── */
+.comparison-section {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.comparison-label {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--ink-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 12px;
+}
+
+.comparison-block {
+  margin-bottom: 14px;
+}
+
+.comparison-block:last-child {
+  margin-bottom: 0;
+}
+
+.comparison-block-title {
+  font-size: 0.83rem;
+  font-weight: 700;
+  color: var(--ink);
+  padding-bottom: 4px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+}
+
+.comparison-block-content {
+  font-size: 0.84rem;
+  color: var(--ink-soft);
+  line-height: 1.55;
+}
+
+.comparison-block-content p {
+  margin: 0;
+}
+
+
 .chat-input-row {
   display: flex;
   gap: 8px;

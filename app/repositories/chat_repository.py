@@ -34,8 +34,17 @@ def create_message(
     role: MessageRole,
     content: str,
     citations: list[dict] | None = None,
+    recommended_documents: list[dict] | None = None,
+    comparison_sections: list[dict] | None = None,
 ) -> Message:
-    message = Message(session_id=session_id, role=role, content=content, citations=citations)
+    message = Message(
+        session_id=session_id,
+        role=role,
+        content=content,
+        citations=citations,
+        recommended_documents=recommended_documents,
+        comparison_sections=comparison_sections,
+    )
     db.add(message)
     db.commit()
     db.refresh(message)

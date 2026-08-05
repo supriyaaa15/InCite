@@ -41,6 +41,8 @@ class Message(TimestampedUUIDBase):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     # [{document_name, page_number, chunk_text, score}, ...]
     citations: Mapped[list] = mapped_column(JSON, nullable=True)
+    recommended_documents: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    comparison_sections: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
     session: Mapped["ChatSession"] = relationship(back_populates="messages")
     query_log: Mapped["QueryLog"] = relationship(

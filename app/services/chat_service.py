@@ -1,3 +1,4 @@
+import enum
 import time
 import uuid
 
@@ -7,8 +8,9 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.llm import get_llm
 from app.models.chat import ChatSession, MessageRole
-from app.repositories import chat_repository, query_log_repository
-from app.services import collection_service, retrieval_service
+from app.models.document import DocumentStatus
+from app.repositories import chat_repository, document_repository, query_log_repository
+from app.services import collection_service, comparison_service, retrieval_service
 
 import logging
 
@@ -323,6 +325,68 @@ _RECOVERY_QUESTIONS = [
     "What are the main concepts discussed in these documents?",
 ]
 
+# Shown when a RECOMMEND or COMPARE request arrives but the collection
+# has fewer than 2 ready documents.
+_SINGLE_DOC_RECOMMEND_MSG = (
+    "Only one document is currently ready in this collection. "
+    "Upload additional documents to receive recommendations across multiple sources."
+)
+_SINGLE_DOC_COMPARE_MSG = (
+    "Comparing documents requires at least two ready documents in this collection. "
+    "Upload another document to use this feature."
+)
+
+
+# ---------------------------------------------------------------------------
+# Intent classification
+# ---------------------------------------------------------------------------
+
+class IntentType(enum.Enum):
+    QUESTION = "question"
+    RECOMMEND = "recommend"
+    COMPARE = "compare"
+
+
+# Phrases that unambiguously signal COMPARE intent.
+# Checked before RECOMMEND so a phrase like "which is better between X and Y"
+# is classified as COMPARE rather than RECOMMEND.
+_COMPARE_PHRASES = frozenset([
+    "compare", " vs ", " vs.", "versus", "difference between",
+    "contrast", "side by side", "which is better between",
+    "how do they differ", "similarities and differences", "differ",
+])
+
+# Phrases that signal RECOMMEND intent.
+# Kept specific to avoid false positives on common words like "examples"
+# appearing in normal questions ("Give me examples of...").
+_RECOMMEND_PHRASES = frozenset([
+    "which document", "which file", "which pdf", "best document",
+    "which one should", "which should i", "recommend",
+    "quick revision", "revision notes", "most detailed",
+    "should i read", "interview prep", "before interview",
+    "for beginners", "beginner friendly", "which has more",
+    "which has better", "better for", "best for",
+])
+
+
+def classify_intent(message: str, history: list[dict]) -> IntentType:  # noqa: ARG001
+    """
+    Rule-based intent classification. O(n) in keyword count, 0 API calls.
+    QUESTION is the safe default — misclassification degrades to a normal
+    answer rather than an error.
+
+    history is accepted for future use (e.g. resolving follow-up intents
+    in a multi-turn conversation) but classification currently uses only
+    the current message.
+    """
+    msg_lower = message.lower()
+    # COMPARE takes priority — check it first
+    if any(phrase in msg_lower for phrase in _COMPARE_PHRASES):
+        return IntentType.COMPARE
+    if any(phrase in msg_lower for phrase in _RECOMMEND_PHRASES):
+        return IntentType.RECOMMEND
+    return IntentType.QUESTION
+
 
 def send_message(
     db: Session,
@@ -330,23 +394,19 @@ def send_message(
     collection_id: uuid.UUID,
     message_text: str,
     session_id: uuid.UUID | None,
-) -> tuple[ChatSession, str, str, list[dict], str, list[str]]:
+) -> tuple[ChatSession, str, str, list[dict], str | None, list[str], list, list]:
     """
-    The full chat flow: verify ownership, get/create the session, retrieve
-    relevant chunks, generate a grounded answer + reasoning + follow-up
-    questions in a single LLM call, persist everything, return what the
-    route needs.  Retrieval itself is delegated to retrieval_service —
-    this function only orchestrates the conversation around it.
+    Full chat orchestration: classify intent, retrieve, branch to the right
+    generator (QUESTION → _generate_answer, RECOMMEND/COMPARE → comparison_service),
+    persist, and return.
 
     Returns (session, answer, reasoning, public_citations, confidence,
-    follow_up_questions).
-    confidence is "none" (nothing cleared the noise filter, LLM never
-    called), "error" (retrieval found something, but every configured LLM
-    failed/hit quota), "low" or "medium" or "high" (based on the best
-    surviving citation score against MEDIUM_CONFIDENCE_THRESHOLD and
-    HIGH_CONFIDENCE_THRESHOLD).
-    follow_up_questions is [] if generation failed, or _RECOVERY_QUESTIONS
-    when confidence is "none".
+    follow_up_questions, recommended_documents, comparison_sections).
+
+    confidence is None for RECOMMEND and COMPARE (no retrieval scoring
+    applies); for QUESTION it is one of "none" | "low" | "medium" | "high" | "error".
+    recommended_documents and comparison_sections are [] unless the
+    corresponding intent was detected.
     """
     collection_service.get_owned_collection(db, user_id, collection_id)
 
@@ -358,59 +418,140 @@ def send_message(
         title = message_text[:60]
         session = chat_repository.create_session(db, user_id, collection_id, title=title)
 
-    # Fetched BEFORE the current user message is saved below — this is
-    # prior turns only, current question excluded, which is exactly what
-    # _generate_answer needs to resolve follow-ups against.
+    # Fetched BEFORE the current user message is saved below — prior turns
+    # only, current question excluded, which is what _generate_answer needs
+    # to resolve follow-up references and what comparison_service needs
+    # to resolve implicit document references ("compare the first two").
     prior_messages = chat_repository.list_messages_by_session(db, session.id)
     history = [{"role": m.role.value, "content": m.content} for m in prior_messages]
 
     chat_repository.create_message(db, session.id, role=MessageRole.user, content=message_text)
 
+    # ── Intent classification ───────────────────────────────────────────
+    intent = classify_intent(message_text, history)
+
+    # ── Retrieval ─────────────────────────────────────────────────
+    # RECOMMEND and COMPARE use a broader top_k so every document has a
+    # realistic chance of appearing in the result set before per-document
+    # capping (comparison_service._cap_per_document) redistributes coverage.
+    retrieval_top_k = settings.TOP_K if intent == IntentType.QUESTION else 30
+
     retrieval_start = time.time()
-    retrieved = retrieval_service.retrieve(collection_id, message_text)
+    retrieved = retrieval_service.retrieve(collection_id, message_text, top_k=retrieval_top_k)
     retrieval_time_ms = int((time.time() - retrieval_start) * 1000)
 
-    # Full chunk_text kept internal — only used to build the LLM prompt.
-    # Unfiltered — kept as-is for query_logs below, so debugging retrieval
-    # quality later sees everything that came back, not just what passed.
+    # Full chunk_text kept internal — only used to build LLM prompts.
+    # Unfiltered — kept as-is for query_logs so debugging retrieval quality
+    # later sees everything that came back, not just what passed.
     citations = retrieval_service.build_citations(db, retrieved)
-    filtered_citations = retrieval_service.filter_citations(citations, settings.MIN_CITATION_SCORE)
 
+    # ── Single-document guard for RECOMMEND / COMPARE ────────────────
+    if intent in (IntentType.RECOMMEND, IntentType.COMPARE):
+        all_docs = document_repository.list_by_collection(db, collection_id)
+        ready_doc_names = [
+            d.filename for d in all_docs if d.status == DocumentStatus.ready
+        ]
+        if len(ready_doc_names) < 2:
+            guard_msg = (
+                _SINGLE_DOC_RECOMMEND_MSG
+                if intent == IntentType.RECOMMEND
+                else _SINGLE_DOC_COMPARE_MSG
+            )
+            asst = chat_repository.create_message(
+                db, session.id, role=MessageRole.assistant, content=guard_msg, citations=[]
+            )
+            query_log_repository.create(
+                db,
+                message_id=asst.id,
+                retrieved_chunk_ids=[],
+                similarity_scores=[],
+                top_k=retrieval_top_k,
+                response_time_ms=retrieval_time_ms,
+                llm_model=settings.LLM_MODEL,
+            )
+            return session, guard_msg, "", [], None, [], [], []
+    else:
+        ready_doc_names = []  # not needed for QUESTION intent
+
+    # ── Intent-specific generation ─────────────────────────────────
     llm_start = time.time()
     model_used = ""
-    if not filtered_citations:
-        answer, reasoning = _no_confidence_answer()
-        confidence = "none"
-        # No context → no grounded follow-ups from the LLM.
-        # Return static recovery questions to help the user discover
-        # what's in their collection instead.
-        follow_up_questions = _RECOVERY_QUESTIONS[:]
-    else:
-        answer, reasoning, follow_up_questions, model_used = _generate_answer(
-            message_text, filtered_citations, history
+
+    if intent == IntentType.RECOMMEND:
+        summary, recommended_documents, follow_up_questions = comparison_service.recommend(
+            question=message_text,
+            citations=citations,
+            history=history,
+            available_document_names=ready_doc_names,
         )
-        top_score = max(c["score"] for c in filtered_citations)
-        if not model_used:
-            # retrieval succeeded but every LLM in the chain failed —
-            # distinct from a retrieval-quality problem, so it gets its
-            # own confidence value rather than being folded into "low"
-            confidence = "error"
-        elif top_score >= settings.HIGH_CONFIDENCE_THRESHOLD:
-            confidence = "high"
-        elif top_score >= settings.MEDIUM_CONFIDENCE_THRESHOLD:
-            confidence = "medium"
+        answer = summary or "Here are my document recommendations based on your request."
+        reasoning = ""
+        confidence = None
+        comparison_sections: list = []
+        public_citations: list = []
+        model_used = settings.LLM_MODEL  # best-effort log; comparison_service handles fallback
+
+    elif intent == IntentType.COMPARE:
+        comp_message, comparison_sections, follow_up_questions = comparison_service.compare(
+            question=message_text,
+            citations=citations,
+            history=history,
+            all_document_names=ready_doc_names,
+        )
+        answer = comp_message or "Here is the document comparison."
+        reasoning = ""
+        confidence = None
+        recommended_documents: list = []
+        public_citations = []
+        model_used = settings.LLM_MODEL
+
+    else:  # IntentType.QUESTION — existing path, completely unchanged
+        filtered_citations = retrieval_service.filter_citations(
+            citations, settings.MIN_CITATION_SCORE
+        )
+        if not filtered_citations:
+            answer, reasoning = _no_confidence_answer()
+            confidence = "none"
+            follow_up_questions = _RECOVERY_QUESTIONS[:]
         else:
-            confidence = "low"
+            answer, reasoning, follow_up_questions, model_used = _generate_answer(
+                message_text, filtered_citations, history
+            )
+            top_score = max(c["score"] for c in filtered_citations)
+            if not model_used:
+                # retrieval succeeded but every LLM in the chain failed —
+                # distinct from a retrieval-quality problem, so it gets its
+                # own confidence value rather than being folded into "low"
+                confidence = "error"
+            elif top_score >= settings.HIGH_CONFIDENCE_THRESHOLD:
+                confidence = "high"
+            elif top_score >= settings.MEDIUM_CONFIDENCE_THRESHOLD:
+                confidence = "medium"
+            else:
+                confidence = "low"
+        # Excerpted version is what actually leaves the server — API response
+        # and what gets persisted in Message.citations. Built from the
+        # filtered list — a citation too weak to inform the answer shouldn't
+        # be shown as if it did.
+        public_citations = retrieval_service.to_public(
+            filtered_citations if filtered_citations else [], message_text
+        )
+        recommended_documents = []
+        comparison_sections = []
+
     llm_time_ms = int((time.time() - llm_start) * 1000)
 
-    # Excerpted version is what actually leaves the server — API response
-    # and what gets persisted in Message.citations. Built from the
-    # filtered list — a citation too weak to inform the answer shouldn't
-    # be shown as if it did.
-    public_citations = retrieval_service.to_public(filtered_citations, message_text)
+    rec_docs_data = [d.model_dump() for d in recommended_documents] if recommended_documents else None
+    comp_secs_data = [s.model_dump() for s in comparison_sections] if comparison_sections else None
 
     assistant_message = chat_repository.create_message(
-        db, session.id, role=MessageRole.assistant, content=answer, citations=public_citations
+        db,
+        session.id,
+        role=MessageRole.assistant,
+        content=answer,
+        citations=public_citations,
+        recommended_documents=rec_docs_data,
+        comparison_sections=comp_secs_data,
     )
 
     # Logged from the ORIGINAL unfiltered citations, deliberately — this
@@ -425,11 +566,18 @@ def send_message(
         message_id=assistant_message.id,
         retrieved_chunk_ids=retrieved_chunk_ids,
         similarity_scores=[c["score"] for c in citations],
-        top_k=settings.TOP_K,
+        top_k=retrieval_top_k,
         response_time_ms=retrieval_time_ms + llm_time_ms,
-        llm_model=model_used or settings.LLM_MODEL,  # log which model actually answered,
-        # not just the configured primary — this is the whole point of the
-        # fallback chain being observable, not a black box
+        llm_model=model_used or settings.LLM_MODEL,  # log which model actually answered
     )
 
-    return session, answer, reasoning, public_citations, confidence, follow_up_questions
+    return (
+        session,
+        answer,
+        reasoning,
+        public_citations,
+        confidence,
+        follow_up_questions,
+        recommended_documents,
+        comparison_sections,
+    )

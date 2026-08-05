@@ -49,7 +49,15 @@ export default function ChatPage() {
       // Note: reasoning isn't persisted server-side (only returned live at
       // generation time), so resumed history shows content + citations,
       // but no reasoning line — expected, not a bug.
-      setMessages(msgs.map((m) => ({ role: m.role, content: m.content, citations: m.citations })));
+      setMessages(
+        msgs.map((m) => ({
+          role: m.role,
+          content: m.content,
+          citations: m.citations,
+          recommendedDocuments: m.recommended_documents ?? [],
+          comparisonSections: m.comparison_sections ?? [],
+        }))
+      );
     } catch (err) {
       setError(err.message);
     }
@@ -110,6 +118,8 @@ export default function ChatPage() {
           citations: res.citations,
           confidence: res.confidence,
           followUpQuestions: res.follow_up_questions ?? [],
+          recommendedDocuments: res.recommended_documents ?? [],
+          comparisonSections: res.comparison_sections ?? [],
         },
       ]);
 
@@ -159,6 +169,8 @@ export default function ChatPage() {
           citations: res.citations,
           confidence: res.confidence,
           followUpQuestions: res.follow_up_questions ?? [],
+          recommendedDocuments: res.recommended_documents ?? [],
+          comparisonSections: res.comparison_sections ?? [],
         },
       ]);
       if (wasNewSession) {
@@ -259,6 +271,44 @@ export default function ChatPage() {
                     ))}
                   </div>
                 )}
+
+                {/* Recommendation cards — only for RECOMMEND responses */}
+                {m.role === "assistant" &&
+                  m.recommendedDocuments &&
+                  m.recommendedDocuments.length > 0 && (
+                    <div className="recommendations-section">
+                      <span className="recommendations-label">Document Recommendations</span>
+                      <div className="recommendation-cards">
+                        {m.recommendedDocuments.map((doc, di) => (
+                          <div key={di} className="recommendation-card">
+                            <div className="recommendation-card-header">
+                              <span className="recommendation-rank">#{doc.rank}</span>
+                              <span className="recommendation-doc-name">{doc.document_name}</span>
+                            </div>
+                            <div className="recommendation-label">{doc.suitability_label}</div>
+                            <p className="recommendation-reason">{doc.reason}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                {/* Comparison sections — only for COMPARE responses */}
+                {m.role === "assistant" &&
+                  m.comparisonSections &&
+                  m.comparisonSections.length > 0 && (
+                    <div className="comparison-section">
+                      <span className="comparison-label">Comparison</span>
+                      {m.comparisonSections.map((section, si) => (
+                        <div key={si} className="comparison-block">
+                          <div className="comparison-block-title">{section.title}</div>
+                          <div className="comparison-block-content markdown-body">
+                            <ReactMarkdown>{section.content}</ReactMarkdown>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
 
                 {/* Follow-up suggestion chips — only for assistant messages,
                     only when not loading, only when the API returned questions */}
