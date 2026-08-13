@@ -1,0 +1,8 @@
+[
+  {
+    "_comment": "Replace collection_id and expected_documents with real values from your database.",
+    "question": "What is machine learning?",
+    "collection_id": "REPLACE-WITH-COLLECTION-UUID",
+    "expected_documents": ["REPLACE-WITH-DOCUMENT-FILENAME.pdf"]
+  }
+]

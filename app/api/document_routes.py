@@ -141,7 +141,14 @@ def delete_document(
     db: Session = Depends(get_db),
 ):
     document = _get_owned_document(db, current_user.id, document_id)
+    collection_id = document.collection_id   # capture before cascade deletes the row
     storage_service.delete_file(document.file_path)
     document_repository.delete(db, document)  # cascades to chunks in Postgres
     # Note: this does not remove the corresponding vectors from Chroma —
     # a known gap, tracked in design-decisions.md as a Phase 2 cleanup item.
+
+    # Invalidate BM25 cache so the deleted document's chunks are no longer
+    # returned by hybrid retrieval on the next query in this collection.
+    from app.core import bm25_store
+    bm25_store.invalidate(str(collection_id))
+

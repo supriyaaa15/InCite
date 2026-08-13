@@ -30,6 +30,14 @@ class Settings(BaseSettings):
     TOP_K: int = 5
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
 
+    # Hybrid retrieval (Phase 4). RETRIEVAL_MODE controls whether BM25 + RRF
+    # is used alongside vector search. "vector" = existing behaviour (default,
+    # safe for all deployments). "hybrid" = BM25 + Chroma vector + RRF fusion.
+    # BM25_RRF_K is the Reciprocal Rank Fusion constant (60 is the TREC standard
+    # and performs well without per-dataset tuning).
+    RETRIEVAL_MODE: str = "vector"   # "vector" | "hybrid"
+    BM25_RRF_K: int = 60
+
     # Confidence-aware RAG (Days 28-29, recalibrated Day 30). Two
     # boundaries, not one — see docs/design-decisions.md for why a single
     # top-score cutoff isn't reliable on its own (a real historical case

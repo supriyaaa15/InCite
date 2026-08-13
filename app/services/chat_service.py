@@ -347,14 +347,45 @@ class IntentType(enum.Enum):
     COMPARE = "compare"
 
 
-# Phrases that unambiguously signal COMPARE intent.
-# Checked before RECOMMEND so a phrase like "which is better between X and Y"
-# is classified as COMPARE rather than RECOMMEND.
-_COMPARE_PHRASES = frozenset([
-    "compare", " vs ", " vs.", "versus", "difference between",
-    "contrast", "side by side", "which is better between",
-    "how do they differ", "similarities and differences", "differ",
+# ── COMPARE detection ─────────────────────────────────────────────────────────
+#
+# Design rule (from user feedback):
+#   COMPARE fires ONLY when the message explicitly refers to documents/files.
+#   "What is the difference between supervised and unsupervised learning?"
+#   must remain QUESTION even though it contains a compare-verb.
+#
+# Two-part check:
+#   1. A compare-verb is present (compare, contrast, vs, versus, side by side).
+#   2. A document-reference signal is present (pdf, document, file, "these docs",
+#      ordinal phrases like "first two", "both documents", etc.).
+#
+# Both conditions must be satisfied simultaneously for COMPARE intent.
+
+_COMPARE_VERBS = frozenset([
+    "compare", "contrast", " vs ", " vs.", "versus", "side by side",
+    "side-by-side",
 ])
+
+# Words/patterns that indicate the user is referring to uploaded files, not
+# to abstract concepts. These are anchors — they must co-occur with a compare-
+# verb to trigger COMPARE.
+_DOCUMENT_REFERENCE_SIGNALS = frozenset([
+    ".pdf", "document", "documents", "file", "files", "pdf", "pdfs",
+    "notes", "my notes", "these docs", "those docs", "both docs",
+    "the docs", "first document", "second document", "third document",
+    "first two", "both documents", "these files", "those files",
+    "first file", "second file", "uploaded", "which doc", "which pdf",
+    "which file",
+])
+
+
+def _has_compare_verb(msg: str) -> bool:
+    return any(phrase in msg for phrase in _COMPARE_VERBS)
+
+
+def _has_document_reference(msg: str) -> bool:
+    return any(signal in msg for signal in _DOCUMENT_REFERENCE_SIGNALS)
+
 
 # Phrases that signal RECOMMEND intent.
 # Kept specific to avoid false positives on common words like "examples"
@@ -375,17 +406,27 @@ def classify_intent(message: str, history: list[dict]) -> IntentType:  # noqa: A
     QUESTION is the safe default — misclassification degrades to a normal
     answer rather than an error.
 
+    COMPARE requires BOTH a compare-verb AND a document-reference signal.
+    This prevents concept-comparison questions ("difference between supervised
+    and unsupervised learning") from being misclassified as COMPARE.
+
     history is accepted for future use (e.g. resolving follow-up intents
     in a multi-turn conversation) but classification currently uses only
     the current message.
     """
     msg_lower = message.lower()
-    # COMPARE takes priority — check it first
-    if any(phrase in msg_lower for phrase in _COMPARE_PHRASES):
+
+    # COMPARE: compare-verb + document reference must both be present.
+    # Checked before RECOMMEND so "compare these two PDFs, which is better"
+    # is classified as COMPARE rather than RECOMMEND.
+    if _has_compare_verb(msg_lower) and _has_document_reference(msg_lower):
         return IntentType.COMPARE
+
     if any(phrase in msg_lower for phrase in _RECOMMEND_PHRASES):
         return IntentType.RECOMMEND
+
     return IntentType.QUESTION
+
 
 
 def send_message(
@@ -437,7 +478,7 @@ def send_message(
     retrieval_top_k = settings.TOP_K if intent == IntentType.QUESTION else 30
 
     retrieval_start = time.time()
-    retrieved = retrieval_service.retrieve(collection_id, message_text, top_k=retrieval_top_k)
+    retrieved = retrieval_service.retrieve(collection_id, message_text, db, top_k=retrieval_top_k)
     retrieval_time_ms = int((time.time() - retrieval_start) * 1000)
 
     # Full chunk_text kept internal — only used to build LLM prompts.

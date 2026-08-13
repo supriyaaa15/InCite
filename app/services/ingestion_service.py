@@ -79,8 +79,9 @@ def _flush_batch(db, document, batch: list[dict], batch_number: int, embedder, s
     batch_metadatas = [
         {
             "document_id": str(document.id),
-            "page_number": c["page_number"],
-            "chunk_index": c["chunk_index"],
+            "document_name": document.filename,   # Phase 4: stored here so retrieval
+            "page_number": c["page_number"],       # never needs a Postgres round-trip
+            "chunk_index": c["chunk_index"],       # just to resolve the filename.
         }
         for c in batch
     ]
@@ -341,6 +342,11 @@ def ingest_document(document_id: str) -> None:
         status_update_time = time.perf_counter() - stage_start
         total_time = time.perf_counter() - total_start
 
+        # Invalidate BM25 cache so the next retrieve() rebuilds from the
+        # updated Chroma collection that now includes the new chunks.
+        from app.core import bm25_store
+        bm25_store.invalidate(str(document.collection_id))
+
         print("DONE")
         print(f"""
         ========== INGESTION TIMINGS ==========
@@ -370,6 +376,11 @@ def ingest_document(document_id: str) -> None:
         )
         db.rollback()
         _mark_failed(db, document, exc.error_code, exc.user_message, store, elapsed)
+        # Partial Chroma data was cleaned up by _mark_failed → invalidate
+        # the BM25 cache so stale chunks aren't served.
+        from app.core import bm25_store
+        if document is not None:
+            bm25_store.invalidate(str(document.collection_id))
 
     except MemoryError:
         # Python-catchable OOM.  Infrastructure-level OOMKilled (SIGKILL /
@@ -395,6 +406,9 @@ def ingest_document(document_id: str) -> None:
             store,
             elapsed,
         )
+        from app.core import bm25_store
+        if document is not None:
+            bm25_store.invalidate(str(document.collection_id))
 
     except Exception:
         elapsed = time.perf_counter() - total_start
@@ -417,6 +431,9 @@ def ingest_document(document_id: str) -> None:
             store,
             elapsed,
         )
+        from app.core import bm25_store
+        if document is not None:
+            bm25_store.invalidate(str(document.collection_id))
 
     finally:
         db.close()
