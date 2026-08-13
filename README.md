@@ -6,9 +6,6 @@ Upload PDFs into collections, ask questions, and get answers grounded in your ow
 documents — not the model's training data — with every claim traceable to a specific
 document, page, and passage.
 
-🔗 **Live app:** [in-cite.vercel.app](https://in-cite.vercel.app)
-🔗 **API:** [incite-0vgr.onrender.com/docs](https://incite-0vgr.onrender.com/docs)
-
 ---
 
 ## The problem this solves
@@ -42,13 +39,13 @@ alone aren't sufficient.
 ## Architecture
 
 ```
-Vercel (React frontend)
+React frontend
         │
         ▼
-Render — FastAPI backend + embedded Chroma (PersistentClient)
+FastAPI backend + embedded Chroma (PersistentClient)
         │
         ▼
-Neon (managed Postgres)
+PostgreSQL
 ```
 
 Backend is layered: routes are thin, business logic lives in services, DB access in
@@ -68,7 +65,7 @@ repositories. Full breakdown: [`docs/architecture.md`](docs/architecture.md)
 | LLM | Google Gemini |
 | Embeddings | `sentence-transformers` (local, CPU) |
 | Auth | JWT |
-| Deployment | Render (backend), Vercel (frontend), Neon (Postgres) |
+| Deployment | Docker Compose (local); cloud deployment platform not currently configured |
 
 Retrieval was built manually first — raw chunking, embeddings, cosine similarity — then
 migrated to LangChain. Every abstraction can be explained from first principles, not
@@ -88,11 +85,11 @@ Full reasoning for 40+ decisions is in [`docs/design-decisions.md`](docs/design-
   this isn't one blunt number.
 
 - **Embedded Chroma over a separate service.** Chroma runs in-process via
-  `PersistentClient` rather than as its own server — a deliberate trade-off to stay on
-  free-tier hosting (a private Render service costs ~$7/month; a public Chroma server
-  has no built-in auth). The honest cost: embedded data doesn't survive restarts without
-  a persistent disk. Acceptable for a portfolio project; documented explicitly so it
-  isn't mistaken for a universally good pattern.
+  `PersistentClient` rather than as its own server. A public Chroma server has no
+  built-in auth, and running it as a private service on any hosting platform typically
+  requires a paid tier. Embedded is simpler and self-contained; the honest cost is that
+  data doesn't survive restarts without a persistent disk — acceptable for a portfolio
+  project, not for production with real user data.
 
 - **Hybrid retrieval fuses rankings, not scores.** Vector similarity and BM25 scores
   live on incompatible scales — averaging them is meaningless. Instead, both result lists
@@ -105,9 +102,8 @@ Full reasoning for 40+ decisions is in [`docs/design-decisions.md`](docs/design-
 
 ## Known limitations
 
-- Embedded Chroma data doesn't survive Render restarts without a persistent disk
-  (a keep-alive ping prevents idle spin-downs, but deploy-triggered restarts still
-  wipe it — not production-grade)
+- Embedded Chroma data doesn't survive process restarts without a persistent disk
+  — not production-grade for real user data
 - `reasoning` and `confidence` aren't persisted with historical messages; generated
   live, shown once
 - Similarity thresholds are tuned against this project's test documents, not
