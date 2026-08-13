@@ -66,10 +66,6 @@ deploy debugging session from guesswork into a 10-second check.
 
 **Decision:** GOOGLE_API_KEY / Gemini for answer generation, not Anthropic.
 
-**Why:** [fill in your actual reason — e.g. free-tier quota generous enough for
-
-dev/demo usage, or existing familiarity with the Gemini API]
-
 **Tradeoff acknowledged:** switching providers later means updating the LLM
 
 call inside chat_service and the prompt formatting — isolated to one service
@@ -101,34 +97,6 @@ produce a small trailing chunk that's mostly duplicate content (e.g. a
 chunks into the previous chunk instead of keeping them separate.
 
 
-
-## [Day 5-6] Manual RAG pipeline validated end-to-end
-
-
-
-Decision: built the full pipeline (embed -> store in Chroma -> retrieve ->
-
-generate) as a standalone script (scripts/test_rag.py) before touching FastAPI.
-
-Why: confirms retrieval quality and generation correctness in isolation,
-
-with nothing else to blame if something looks wrong later inside the API.
-
-Result: tested against "Mastering Bitcoin" PDF, question "What is a Hash
-
-Time Lock Contract?" — top 5 retrieved chunks were all genuinely on-topic
-
-(pages 184, 351, 187, 358, 188, similarity 0.52 down to 0.46, sensible
-
-descending order). Generated answer correctly described both HTLC clauses
-
-(redemption via secret+hash, refund via timelock), named the actual opcode
-
-(CHECKLOCKTIMEVERIFY) and script structure — traceable to the retrieved
-
-chunks, not generic model knowledge. Confirms chunking + embeddings +
-
-retrieval + grounded generation all work correctly together.
 
 
 
@@ -173,32 +141,6 @@ Possible causes to investigate later: context size (5 chunks in the prompt),
 model choice (flash vs a faster/lighter variant), network latency to the API.
 
 
-
-## [Day 7-8] JWT auth working end-to-end
-
-
-
-Decision: layered auth flow — auth_routes.py (HTTP) -> auth_service.py
-
-(business rules) -> user_repository.py (DB queries) -> models/user.py.
-
-get_current_user in core/deps.py is the single shared dependency every
-
-future protected route will use.
-
-Result: verified via Swagger UI — POST /auth/register creates a user
-
-with a bcrypt-hashed password, POST /auth/login returns a valid JWT,
-
-GET /auth/me (protected) correctly resolves the token back into the
-
-authenticated user's id/email/created_at. Full chain confirmed working.
-
-Security decision: login returns the same error for "no such user" and
-
-"wrong password" — revealing which one it was allows attackers to enumerate
-
-valid registered emails.
 
 
 
@@ -474,11 +416,7 @@ answer.
 
 Fix: added a reasoning field to ChatResponse. Generated via
 
-structured JSON output from the LLM (response_mime_type: application/json
-
-
-
-
+structured JSON output from the LLM (response_mime_type: application/json,
 
 response_schema with answer and reasoning keys) — confirmed this is
 
@@ -679,24 +617,6 @@ otherwise-unrelated packages.
 
 
 ## [Day 17] Query logging verified with real data
-
-
-
-Verification: query_logs was built early (Day 12-13, alongside chat)
-
-and assumed working since chat requests returned 200 OK with no errors —
-
-but never directly confirmed with real rows, unlike chunks which was
-
-checked directly after Day 9-11. Ran a SELECT against query_logs after
-
-the Day 14-15 LangChain migration to close that gap properly.
-
-Result: confirmed real rows — top_k=5 on every row (matches config),
-
-num_chunks=5 (every retrieval actually returned the expected count),
-
-correct llm_model, and response_time_ms populated.
 
 Observation: response_time_ms varied widely across requests using the
 
@@ -1362,53 +1282,15 @@ every file that referenced the old client type directly.
 
 
 
-## [Day 26] Embedded Chroma migration verified end-to-end
+Operational note: after removing a service from docker-compose.yml,
 
+its already-running container becomes an orphan and holds the network
 
+open. docker compose down fails with "Resource is still in use" until
 
-Verification: after wiping the old (incompatible, server-format)
+you run docker compose down --remove-orphans, which specifically targets
 
-local chroma_data volume, ran the full pipeline fresh: GET /health/chroma
-
-returned {"status": "ok", "chroma": "connected"} confirming
-
-PersistentClient initialized correctly; uploaded a new PDF and confirmed
-
-it reached status="ready"; sent a chat question and got a correctly
-
-grounded answer with accurate reasoning and relevant citations
-
-(scores 0.21 down to 0.03, sensible descending order, same pattern as
-
-every prior test throughout the project).
-
-Confirms: the "zero changes to retrieval_service.py and
-
-ingestion_service.py" claim held under actual testing, not just static
-
-code review — both files' Chroma-touching code paths (upsert during
-
-ingestion, similarity_search_with_score during retrieval) worked
-
-correctly against PersistentClient with no modification, exactly as
-
-predicted from chromadb's client-agnostic Collection API.
-
-One real hiccup during this migration, unrelated to Chroma itself:
-
-after removing the chroma service from docker-compose.yml, docker compose down failed with "Network incite_default: Resource is still in
-
-use" — the old chroma container had become an orphan (no longer
-
-defined in the compose file, but still running and holding the network
-
-open). Fixed with docker compose down --remove-orphans, which
-
-specifically targets containers left over from a removed service
-
-definition. Worth remembering: removing a service from docker-compose.yml
-
-doesn't automatically clean up its already-running container.
+containers left over from a removed service definition.
 
 
 
@@ -1624,43 +1506,7 @@ claims, and the gap between them caused real confusion mid-testing.
 
 
 
-## [Day 27] Deployment stability confirmed: HEAD fix + keep-alive holding together
 
-
-
-Verification: after deploying the HEAD-support fix and confirming
-
-UptimeRobot showed no new incidents for 15+ minutes, re-uploaded a fresh
-
-test document and re-ran the exact query that failed before ("what is
-
-array"). Clean result: grounded answer, correct reasoning citing the
-
-right pages, citations properly ordered by score (0.65 -> 0.53 -> 0.36).
-
-Closes out the spin-down data-loss issue from earlier — the
-
-combination of (1) a real persistent-disk-free architecture decision
-
-(embedded Chroma, accepted trade-off) with (2) a keep-alive ping
-
-preventing the free-tier inactivity spin-down that would otherwise
-
-trigger data loss, is now a stable, working setup for continued
-
-testing and demos.
-
-Operational note for future self: any code push triggers a Render
-
-redeploy, which still wipes embedded Chroma data (this is a genuinely
-
-different trigger than the inactivity spin-down the keep-alive fixes —
-
-keep-alive only prevents idle-triggered restarts, not deploy-triggered
-
-ones). Re-upload test documents after every deploy going forward, not
-
-just periodically.
 
 
 
