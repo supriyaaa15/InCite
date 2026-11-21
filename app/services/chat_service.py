@@ -232,7 +232,7 @@ def _no_confidence_answer() -> tuple[str, str]:
 
 
 def _generate_answer(
-    question: str, citations: list[dict], history: list[dict]
+    question: str, citations: list[dict], recent_user_messages: list[str]
 ) -> tuple[str, str, list[str], str]:
     """
     Returns (answer, reasoning, follow_up_questions, model_used).
@@ -242,30 +242,25 @@ def _generate_answer(
     noise has already been removed, so everything reaching the prompt is
     something worth answering from.
 
-    history is prior turns in this session ([{role, content}, ...],
-    oldest first, current question NOT included) — without it, a
-    follow-up like "why is it used" has no way to resolve what "it" refers
-    to.
+    Recent user messages help resolve references in follow-up questions.
 
     follow_up_questions is populated from the same structured LLM call as
     the answer — no second API request.  See design-decisions.md (Day 33
     refactor) for why this collapsed from two calls to one.
     """
     history_block = ""
-    if history:
-        recent = history[-6:]  # last ~3 exchanges — enough context, bounded prompt size
-        turns = "\n".join(f"{h['role'].capitalize()}: {h['content']}" for h in recent)
-        history_block = f"Conversation so far:\n{turns}\n\n"
+    if recent_user_messages:
+        turns = "\n".join(f"User: {message}" for message in recent_user_messages)
+        history_block = f"Earlier user messages:\n{turns}\n\n"
 
     context = "\n\n---\n\n".join(
         f"[Page {c['page_number']}, {c['document_name']}]\n{c['chunk_text']}" for c in citations
     )
     prompt = f"""{history_block}You are answering the user's latest question using ONLY the context below.
 
-If there is conversation history above, use it to understand what the
-current question is really asking — resolve pronouns and references like
-"it" or "that" to the specific concept actually being discussed, not just
-anything vaguely related.
+Use earlier user messages only to understand the request and resolve references
+like "it" or "that". Treat the retrieved excerpts as the sole source of
+document claims.
 
 The retrieved context may contain multiple different concepts. Focus your
 answer ONLY on the concept the user is actually asking about. Do not list
@@ -400,7 +395,7 @@ _RECOMMEND_PHRASES = frozenset([
 ])
 
 
-def classify_intent(message: str, history: list[dict]) -> IntentType:  # noqa: ARG001
+def classify_intent(message: str, history: list[str]) -> IntentType:  # noqa: ARG001
     """
     Rule-based intent classification. O(n) in keyword count, 0 API calls.
     QUESTION is the safe default — misclassification degrades to a normal
@@ -444,8 +439,8 @@ def send_message(
     Returns (session, answer, reasoning, public_citations, confidence,
     follow_up_questions, recommended_documents, comparison_sections).
 
-    confidence is None for RECOMMEND and COMPARE (no retrieval scoring
-    applies); for QUESTION it is one of "none" | "low" | "medium" | "high" | "error".
+    Confidence is None for RECOMMEND and COMPARE with eligible evidence.
+    An empty result uses the same refusal for all intents.
     recommended_documents and comparison_sections are [] unless the
     corresponding intent was detected.
     """
@@ -455,21 +450,17 @@ def send_message(
         session = get_owned_session(db, user_id, session_id)
         if session.collection_id != collection_id:
             raise SessionCollectionMismatchError()
+        # Stored assistant answers lack reliable document provenance.
+        recent_user_messages = chat_repository.list_recent_user_messages(db, session.id)
     else:
         title = message_text[:60]
         session = chat_repository.create_session(db, user_id, collection_id, title=title)
-
-    # Fetched BEFORE the current user message is saved below — prior turns
-    # only, current question excluded, which is what _generate_answer needs
-    # to resolve follow-up references and what comparison_service needs
-    # to resolve implicit document references ("compare the first two").
-    prior_messages = chat_repository.list_messages_by_session(db, session.id)
-    history = [{"role": m.role.value, "content": m.content} for m in prior_messages]
+        recent_user_messages = []
 
     chat_repository.create_message(db, session.id, role=MessageRole.user, content=message_text)
 
     # ── Intent classification ───────────────────────────────────────────
-    intent = classify_intent(message_text, history)
+    intent = classify_intent(message_text, recent_user_messages)
 
     # ── Retrieval ─────────────────────────────────────────────────
     # RECOMMEND and COMPARE use a broader top_k so every document has a
@@ -484,10 +475,10 @@ def send_message(
     # Full chunk_text kept internal — only used to build LLM prompts.
     # Unfiltered — kept as-is for query_logs so debugging retrieval quality
     # later sees everything that came back, not just what passed.
-    citations = retrieval_service.build_citations(db, retrieved)
+    citations = retrieval_service.build_citations(retrieved)
 
     # ── Single-document guard for RECOMMEND / COMPARE ────────────────
-    if intent in (IntentType.RECOMMEND, IntentType.COMPARE):
+    if citations and intent in (IntentType.RECOMMEND, IntentType.COMPARE):
         all_docs = document_repository.list_by_collection(db, collection_id)
         ready_doc_names = [
             d.filename for d in all_docs if d.status == DocumentStatus.ready
@@ -518,11 +509,11 @@ def send_message(
     llm_start = time.time()
     model_used = ""
 
-    if intent == IntentType.RECOMMEND:
+    if citations and intent == IntentType.RECOMMEND:
         summary, recommended_documents, follow_up_questions = comparison_service.recommend(
             question=message_text,
             citations=citations,
-            history=history,
+            recent_user_messages=recent_user_messages,
             available_document_names=ready_doc_names,
         )
         answer = summary or "Here are my document recommendations based on your request."
@@ -532,11 +523,11 @@ def send_message(
         public_citations: list = []
         model_used = settings.LLM_MODEL  # best-effort log; comparison_service handles fallback
 
-    elif intent == IntentType.COMPARE:
+    elif citations and intent == IntentType.COMPARE:
         comp_message, comparison_sections, follow_up_questions = comparison_service.compare(
             question=message_text,
             citations=citations,
-            history=history,
+            recent_user_messages=recent_user_messages,
             all_document_names=ready_doc_names,
         )
         answer = comp_message or "Here is the document comparison."
@@ -546,7 +537,7 @@ def send_message(
         public_citations = []
         model_used = settings.LLM_MODEL
 
-    else:  # IntentType.QUESTION — existing path, completely unchanged
+    else:  # Questions and the shared no-evidence response
         filtered_citations = retrieval_service.filter_citations(
             citations, settings.MIN_CITATION_SCORE
         )
@@ -556,7 +547,7 @@ def send_message(
             follow_up_questions = _RECOVERY_QUESTIONS[:]
         else:
             answer, reasoning, follow_up_questions, model_used = _generate_answer(
-                message_text, filtered_citations, history
+                message_text, filtered_citations, recent_user_messages
             )
             top_score = max(c["score"] for c in filtered_citations)
             if not model_used:

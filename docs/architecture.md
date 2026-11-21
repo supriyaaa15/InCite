@@ -20,9 +20,23 @@ Request flow: **API routes** -> **services** (business logic) -> **repositories*
 - **Chroma**: chunk embeddings (the actual vectors). Chunks in Postgres store
   a `chroma_id` pointing to the corresponding vector.
 
+## Retrieval and chat
+
+Vector search in embedded Chroma is the configured default. Optional hybrid
+retrieval searches independent vector and BM25 pools, combines their original
+ranks with RRF, and fetches eligible BM25-only chunks from Chroma. The optional
+`hybrid_rerank` mode applies a CrossEncoder to eligible fused candidates.
+
+Chat authorizes the collection and session before retrieval. PostgreSQL verifies
+which candidate documents are ready in that collection and supplies citation
+filenames. Empty eligible evidence produces the existing refusal without a
+provider call. Prompts use fresh evidence and up to three earlier user messages
+for request context. The authorized transcript still includes assistant replies.
+See [ADR 001](decisions/001-postgresql-document-eligibility.md).
+
 ## External services
-- **LLM API** (Google Gemini): called by chat_service to generate answers
-  from retrieved chunks.
+- **LLM API** (Groq via ChatGroq): called by chat_service and comparison_service to generate answers
+  from retrieved chunks (migrated from Google Gemini to avoid free-tier request quota limits).
 
 ## Deployment
 Single Render web service runs the FastAPI app, with Chroma embedded inside it (PersistentClient) rather than as a separate service — avoids Render's requirement that any service receiving private network traffic be on a paid tier. See design-decisions.md for the full reasoning and alternatives considered (paid private Chroma service, Qdrant Cloud, AWS).
@@ -33,12 +47,10 @@ Single Render web service runs the FastAPI app, with Chroma embedded inside it (
   design-decisions.md for the full reasoning.
   Known trade-off: Chroma's embedded data isn't guaranteed to survive a redeploy unless the persist path is backed by a persistent disk. Accepted for this project — documents can be re-uploaded after a redeploy; not acceptable for a real production system with real users.
 
-## Extensibility — where future phases plug in
+## Historical extensibility notes
 
-The architecture was deliberately kept boring and layered specifically so
-each planned future feature has an obvious, minimal-refactor home. None of
-these are built yet — this section exists so implementing them later means
-"add code in this one place," not "figure out where this belongs."
+These original design notes describe where proposed features would fit. The
+sections above describe the current retrieval and chat behavior.
 
 **Phase 2 — Confidence-aware RAG**: `retrieval_service.build_citations()`
 already returns a `score` per chunk, and that data already reaches

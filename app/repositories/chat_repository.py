@@ -60,6 +60,18 @@ def list_messages_by_session(db: DBSession, session_id: uuid.UUID) -> list[Messa
     )
 
 
+def list_recent_user_messages(db: DBSession, session_id: uuid.UUID) -> list[str]:
+    """Read up to three prior user messages for prompts, in chronological order."""
+    rows = (
+        db.query(Message.content)
+        .filter(Message.session_id == session_id, Message.role == MessageRole.user)
+        .order_by(Message.created_at.desc(), Message.id.desc())
+        .limit(3)
+        .all()
+    )
+    return [content for (content,) in reversed(rows)]
+
+
 def delete_session(db: DBSession, session: ChatSession) -> None:
     db.delete(session)  # cascades to messages
     db.commit()

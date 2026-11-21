@@ -1,33 +1,7 @@
-"""
-Retrieval, isolated from chat orchestration on purpose. When Hybrid Search
-(BM25 + vector) or Reranking get built later, they change what happens
-inside retrieve() — chat_service.py, the routes, and everything else stay
-untouched, because they only ever call this module's public functions.
+"""Collection-scoped vector, hybrid, and reranked retrieval with SQL eligibility."""
 
-Migrated to LangChain (Day 14-15) — retrieve() now goes through
-langchain_chroma.Chroma instead of the raw chromadb client. Storage itself
-is unchanged: this attaches to the exact same per-collection Chroma
-collections that ingestion_service.py already writes to, using the same
-embedding weights (see core/embeddings.py's LangChain wrapper) — same
-data, same vectors, just queried through LangChain's interface now.
-
-Phase 4 — Hybrid Retrieval (BM25 + Vector + RRF)
---------------------------------------------------
-retrieve() now supports two modes controlled by settings.RETRIEVAL_MODE:
-
-  "vector"  — existing behaviour, unchanged.
-  "hybrid"  — vector search (top_k * 4 candidates) + BM25 search over the
-              full Chroma corpus, fused with Reciprocal Rank Fusion.
-
-The return type of retrieve() is always list[tuple[Document, float]] so
-build_citations(), filter_citations(), and to_public() are completely
-unaffected by the mode change.
-
-build_citations() is updated to prefer document_name from Chroma metadata
-(set during ingestion since Phase 4) and fall back to a Postgres lookup
-only for older chunks that lack the field.
-"""
-
+from functools import lru_cache
+import logging
 import re
 import time
 import uuid
@@ -35,12 +9,26 @@ from typing import Optional
 
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.core.chroma_client import get_chroma_client, get_collection_store
 from app.core.config import settings
 from app.core.embeddings import get_langchain_embeddings
 from app.repositories import document_repository
+
+
+logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=1)
+def _get_reranker(model_name: str):
+    """
+    Lazy singleton for sentence_transformers.CrossEncoder.
+    Loaded once on first call, reused for subsequent reranking requests.
+    """
+    from sentence_transformers import CrossEncoder
+    return CrossEncoder(model_name)
 
 
 # ── Chroma vector store accessor ─────────────────────────────────────────────
@@ -61,6 +49,35 @@ def _get_vectorstore(collection_id: uuid.UUID) -> Chroma:
 
 
 # ── Vector retrieval ──────────────────────────────────────────────────────────
+
+def _document_uuid(value: object) -> uuid.UUID | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return uuid.UUID(value)
+    except ValueError:
+        return None
+
+
+def _chunk_id(doc: Document) -> str | None:
+    metadata = doc.metadata
+    document_id = metadata.get("document_id")
+    page = metadata.get("page_number")
+    index = metadata.get("chunk_index")
+    if _document_uuid(document_id) is None or not isinstance(page, int) or not isinstance(index, int):
+        return None
+    return f"{document_id}_p{page}_c{index}"
+
+
+def _use_ready_document(doc: Document, ready_names: dict[uuid.UUID, str]) -> bool:
+    if _chunk_id(doc) is None:
+        return False
+    document_id = _document_uuid(doc.metadata["document_id"])
+    if document_id is None or document_id not in ready_names:
+        return False
+    doc.metadata["document_name"] = ready_names[document_id]
+    return True
+
 
 def _vector_retrieve(
     collection_id: uuid.UUID,
@@ -87,9 +104,9 @@ def _vector_retrieve(
 
     lookup: dict[str, tuple[Document, float]] = {}
     for doc, dist in results:
-        m = doc.metadata
-        chroma_id = f"{m['document_id']}_p{m['page_number']}_c{m['chunk_index']}"
-        lookup[chroma_id] = (doc, dist)
+        chroma_id = _chunk_id(doc)
+        if chroma_id is not None:
+            lookup[chroma_id] = (doc, dist)
 
     return results, lookup
 
@@ -130,17 +147,32 @@ def _rrf_fuse(
     top_k: int,
 ) -> list[tuple[str, float, int | None, int | None]]:
     """
-    Reciprocal Rank Fusion over the vector candidate pool.
+    Reciprocal Rank Fusion over the UNION of Vector and BM25 candidates.
 
-    Only chunks already in vector_lookup participate. BM25-only results
-    that are absent from the vector pool are skipped — with a pool of
-    top_k * 4 this is uncommon and the simplicity benefit (no second
-    Chroma call) outweighs the marginal quality loss.
+    Phase 3 (independent candidate-pool architecture):
+    Both retrieval systems run independently. RRF must score every candidate
+    that appears in EITHER list, not only those in the Vector pool.
+    A BM25-only chunk receives its BM25 rank contribution; a Vector-only
+    chunk receives its Vector rank contribution; a chunk in both lists
+    accumulates both contributions and naturally ranks higher.
+
+    Scoring formula (standard RRF):
+        score(cid) = Σ  1 / (k + rank_in_list)
+    where the sum runs over every list in which cid appears.
+
+    Parameters
+    ----------
+    vector_lookup : dict mapping chroma_id → (LangChain Document, distance)
+        Ordered by Vector search rank (dict insertion order preserved, Python 3.7+).
+    bm25_results : list of (chroma_id, bm25_score) sorted best-first.
+    k : RRF smoothing constant (60 is the TREC standard default).
+    top_k : maximum number of results to return.
 
     Returns
     -------
-    list of (chroma_id, rrf_score, vector_rank, bm25_rank) sorted
-    best-first, length ≤ top_k.
+    list of (chroma_id, rrf_score, vector_rank | None, bm25_rank | None)
+    sorted best-first, length ≤ top_k.
+    vector_rank / bm25_rank are None when the chunk was absent from that list.
     """
     # Build rank maps (1-based)
     vector_rank_of: dict[str, int] = {
@@ -150,8 +182,12 @@ def _rrf_fuse(
         cid: i + 1 for i, (cid, _) in enumerate(bm25_results)
     }
 
+    # Score every candidate in the UNION of both lists.
+    # Using a set prevents double-counting candidates appearing in both.
+    all_candidate_ids: set[str] = set(vector_rank_of.keys()) | set(bm25_rank_of.keys())
+
     scores: dict[str, float] = {}
-    for cid in vector_lookup:
+    for cid in all_candidate_ids:
         score = 0.0
         if cid in vector_rank_of:
             score += 1.0 / (k + vector_rank_of[cid])
@@ -165,8 +201,8 @@ def _rrf_fuse(
         (
             cid,
             rrf_score,
-            vector_rank_of.get(cid),
-            bm25_rank_of.get(cid),
+            vector_rank_of.get(cid),    # None when BM25-only
+            bm25_rank_of.get(cid),      # None when Vector-only
         )
         for cid, rrf_score in ranked
     ]
@@ -177,101 +213,211 @@ def _rrf_fuse(
 def retrieve(
     collection_id: uuid.UUID,
     query_text: str,
-    db: Optional[Session] = None,
+    db: Session | None,
     top_k: int | None = None,
 ) -> list[tuple[Document, float]]:
+    """Return ranked chunks of ready documents in an authorized collection.
+
+    Request callers must verify collection ownership before retrieval.
+    Scores retain their mode-specific meaning: vector distance, RRF score,
+    or reranker output.
     """
-    Returns list[tuple[Document, score]] for the top_k most relevant chunks.
-
-    In "vector" mode: score = cosine similarity (1 - distance).
-    In "hybrid" mode: score = RRF score.
-
-    The return type is identical in both modes so build_citations() is
-    completely unaffected by the choice of retrieval mode.
-
-    Parameters
-    ----------
-    db:
-        Required for "hybrid" mode (BM25 index may need a Postgres fallback
-        for legacy chunks). Unused (but accepted) in "vector" mode.
-    """
+    if db is None:
+        return []
     k = top_k or settings.TOP_K
     mode = settings.RETRIEVAL_MODE.lower()
-
     t_start = time.perf_counter()
 
-    if mode != "hybrid":
-        # ── Vector-only ───────────────────────────────────────────────────
-        t_vec = time.perf_counter()
-        results, _ = _vector_retrieve(collection_id, query_text, k)
-        vec_ms = int((time.perf_counter() - t_vec) * 1000)
-        total_ms = int((time.perf_counter() - t_start) * 1000)
-
-        print(
-            f"\n{'=' * 30}\n"
-            f"Requested Mode : vector\n"
-            f"Actual Mode    : vector\n\n"
-            f"Vector Search  : {vec_ms:>4} ms   (candidates: {len(results)})\n"
-            f"Total Retrieval: {total_ms:>4} ms   (returned: {min(k, len(results))})\n"
-            f"{'=' * 30}\n"
-        )
-        return results
-
-    # ── Hybrid mode ───────────────────────────────────────────────────────
-    candidate_k = k * 4   # broad vector pool so BM25 can meaningfully rerank
-
+    # Bounded overfetch lets ready chunks below stale hits fill the result.
+    candidate_k = k * 4
     t_vec = time.perf_counter()
     vector_results, vector_lookup = _vector_retrieve(collection_id, query_text, candidate_k)
     vec_ms = int((time.perf_counter() - t_vec) * 1000)
 
-    actual_mode = "hybrid"
+    actual_mode = mode
     fallback_reason: str | None = None
-
+    bm25_results: list[tuple[str, float]] = []
     t_bm25 = time.perf_counter()
-    try:
-        bm25_results = _bm25_retrieve(collection_id, query_text, candidate_k, db)
-    except Exception as exc:
-        bm25_results = []
-        actual_mode = "vector"
-        fallback_reason = str(exc)
+    if mode in ("hybrid", "hybrid_rerank"):
+        try:
+            # Names come from the eligibility query, including for legacy chunks.
+            bm25_results = _bm25_retrieve(collection_id, query_text, candidate_k, None)
+        except Exception as exc:
+            actual_mode = "vector"
+            fallback_reason = str(exc)
     bm25_ms = int((time.perf_counter() - t_bm25) * 1000)
 
-    if actual_mode == "hybrid":
-        t_rrf = time.perf_counter()
-        fused = _rrf_fuse(vector_lookup, bm25_results, settings.BM25_RRF_K, k)
-        rrf_ms = int((time.perf_counter() - t_rrf) * 1000)
+    candidate_chunk_ids = set(vector_lookup) | {chunk_id for chunk_id, _ in bm25_results}
+    candidate_ids = {
+        document_id
+        for chunk_id in candidate_chunk_ids
+        if (document_id := _document_uuid(chunk_id.partition("_p")[0])) is not None
+    }
+    if not candidate_ids:
+        return []
+    try:
+        ready_names = document_repository.get_ready_document_names(db, collection_id, candidate_ids)
+    except SQLAlchemyError:
+        logger.warning("Document eligibility query failed for collection %s", collection_id)
+        db.rollback()
+        return []
+    if not ready_names:
+        return []
 
-        # Reconstruct the output list from the vector dict — no second Chroma call.
-        final: list[tuple[Document, float]] = []
-        for chroma_id, rrf_score, v_rank, b_rank in fused:
-            doc, _dist = vector_lookup[chroma_id]
-            # Attach debug metadata (stripped by to_public() before leaving the server)
-            doc.metadata["_vector_rank"] = v_rank
-            doc.metadata["_bm25_rank"] = b_rank
-            doc.metadata["_rrf_score"] = round(rrf_score, 6)
-            doc.metadata["_retrieval_mode"] = "hybrid"
-            final.append((doc, rrf_score))
-
+    if mode not in ("hybrid", "hybrid_rerank"):
+        results = [(doc, score) for doc, score in vector_results if _use_ready_document(doc, ready_names)][:k]
         total_ms = int((time.perf_counter() - t_start) * 1000)
+
         print(
             f"\n{'=' * 30}\n"
-            f"Requested Mode : hybrid\n"
-            f"Actual Mode    : hybrid\n\n"
+            f"Requested Mode : {mode}\n"
+            f"Actual Mode    : vector\n\n"
             f"Vector Search  : {vec_ms:>4} ms   (candidates: {len(vector_results)})\n"
-            f"BM25 Search    : {bm25_ms:>4} ms   (candidates: {len(bm25_results)})\n"
-            f"RRF Fusion     : {rrf_ms:>4} ms\n"
-            f"Total Retrieval: {total_ms:>4} ms   (returned: {len(final)})\n"
+            f"Total Retrieval: {total_ms:>4} ms   (returned: {len(results)})\n"
             f"{'=' * 30}\n"
         )
-        return final
+        return results
+
+    if actual_mode in ("hybrid", "hybrid_rerank"):
+        t_rrf = time.perf_counter()
+        rrf_top_k = settings.RERANK_POOL_K if mode == "hybrid_rerank" else k
+        # Keep the original rank contributions and filter before applying the cutoff.
+        fused = _rrf_fuse(vector_lookup, bm25_results, settings.BM25_RRF_K, len(candidate_chunk_ids))
+        fused = [hit for hit in fused if _document_uuid(hit[0].partition("_p")[0]) in ready_names]
+        rrf_ms = int((time.perf_counter() - t_rrf) * 1000)
+
+        # ── Fetch Documents for BM25-only survivors ───────────────────────
+        bm25_only_ids: list[str] = [
+            chroma_id
+            for chroma_id, _, _, _ in fused
+            if chroma_id not in vector_lookup
+        ]
+
+        bm25_only_lookup: dict[str, tuple[Document, float]] = {}
+        if bm25_only_ids:
+            try:
+                raw_collection = get_collection_store(str(collection_id))
+                fetched = raw_collection.get(
+                    ids=bm25_only_ids,
+                    include=["documents", "metadatas"],
+                )
+                for i, cid in enumerate(fetched["ids"]):
+                    text = (fetched["documents"] or [])[i] if i < len(fetched["documents"] or []) else ""
+                    meta = (fetched["metadatas"] or [])[i] if i < len(fetched["metadatas"] or []) else {}
+                    bm25_only_lookup[cid] = (
+                        Document(page_content=text, metadata=meta),
+                        0.0,   # no cosine distance — this chunk came from BM25 only
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Hybrid: Chroma fetch for BM25-only IDs failed — "
+                    "those candidates will be excluded from the result. Error: %s", exc
+                )
+
+        # ── Construct candidate list ──────────────────────────────────────
+        candidates: list[dict] = []
+        for chroma_id, rrf_score, v_rank, b_rank in fused:
+            if chroma_id in vector_lookup:
+                doc, _dist = vector_lookup[chroma_id]
+            elif chroma_id in bm25_only_lookup:
+                doc, _dist = bm25_only_lookup[chroma_id]
+            else:
+                continue
+            if _chunk_id(doc) != chroma_id or not _use_ready_document(doc, ready_names):
+                continue
+
+            candidates.append({
+                "doc": doc,
+                "chroma_id": chroma_id,
+                "rrf_score": rrf_score,
+                "v_rank": v_rank,
+                "b_rank": b_rank,
+            })
+        candidates = candidates[:rrf_top_k]
+
+        if mode == "hybrid":
+            final: list[tuple[Document, float]] = []
+            for c in candidates[:k]:
+                doc = c["doc"]
+                doc.metadata["_vector_rank"] = c["v_rank"]
+                doc.metadata["_bm25_rank"] = c["b_rank"]
+                doc.metadata["_rrf_score"] = round(c["rrf_score"], 6)
+                doc.metadata["_retrieval_mode"] = "hybrid"
+                final.append((doc, c["rrf_score"]))
+
+            total_ms = int((time.perf_counter() - t_start) * 1000)
+            bm25_only_count = sum(c["v_rank"] is None for c in candidates)
+            print(
+                f"\n{'=' * 30}\n"
+                f"Requested Mode : hybrid\n"
+                f"Actual Mode    : hybrid\n\n"
+                f"Vector Search  : {vec_ms:>4} ms   (candidates: {len(vector_results)})\n"
+                f"BM25 Search    : {bm25_ms:>4} ms   (candidates: {len(bm25_results)})\n"
+                f"RRF Fusion     : {rrf_ms:>4} ms   (union size: {len(candidate_chunk_ids)}, bm25-only in top-k: {bm25_only_count})\n"
+                f"Total Retrieval: {total_ms:>4} ms   (returned: {len(final)})\n"
+                f"{'=' * 30}\n"
+            )
+            return final
+
+        else:
+            # ── Mode: hybrid_rerank ───────────────────────────────────────
+            t_rerank = time.perf_counter()
+            rerank_failed = False
+            try:
+                pairs = [(query_text, c["doc"].page_content) for c in candidates]
+                if pairs:
+                    reranker = _get_reranker(settings.RERANKER_MODEL)
+                    raw_scores = reranker.predict(pairs)
+                    for c, s in zip(candidates, raw_scores):
+                        c["rerank_score"] = float(s)
+                    candidates.sort(key=lambda x: x["rerank_score"], reverse=True)
+                else:
+                    rerank_failed = True
+            except Exception as exc:
+                logger.warning(
+                    "Hybrid+Rerank: CrossEncoder reranker failed (%s). Falling back to RRF top-%d.",
+                    exc, k
+                )
+                rerank_failed = True
+            rerank_ms = int((time.perf_counter() - t_rerank) * 1000)
+
+            final: list[tuple[Document, float]] = []
+            for c in candidates[:k]:
+                doc = c["doc"]
+                doc.metadata["_vector_rank"] = c["v_rank"]
+                doc.metadata["_bm25_rank"] = c["b_rank"]
+                doc.metadata["_rrf_score"] = round(c["rrf_score"], 6)
+                doc.metadata["_retrieval_mode"] = "hybrid_rerank"
+                if not rerank_failed and "rerank_score" in c:
+                    doc.metadata["_rerank_score"] = round(c["rerank_score"], 6)
+                    score_val = c["rerank_score"]
+                else:
+                    doc.metadata["_rerank_score"] = None
+                    score_val = c["rrf_score"]
+                final.append((doc, score_val))
+
+            total_ms = int((time.perf_counter() - t_start) * 1000)
+            actual_log_mode = "hybrid_rerank" if not rerank_failed else "hybrid (rerank fallback)"
+            print(
+                f"\n{'=' * 30}\n"
+                f"Requested Mode : hybrid_rerank\n"
+                f"Actual Mode    : {actual_log_mode}\n\n"
+                f"Vector Search  : {vec_ms:>4} ms   (candidates: {len(vector_results)})\n"
+                f"BM25 Search    : {bm25_ms:>4} ms   (candidates: {len(bm25_results)})\n"
+                f"RRF Fusion     : {rrf_ms:>4} ms   (candidate pool: {len(candidates)})\n"
+                f"CrossEncoder   : {rerank_ms:>4} ms   (reranked: {len(candidates)})\n"
+                f"Total Retrieval: {total_ms:>4} ms   (returned: {len(final)})\n"
+                f"{'=' * 30}\n"
+            )
+            return final
 
     else:
         # BM25 failed — fall back to trimmed vector results
-        trimmed = vector_results[:k]
+        trimmed = [(doc, score) for doc, score in vector_results if _use_ready_document(doc, ready_names)][:k]
         total_ms = int((time.perf_counter() - t_start) * 1000)
         print(
             f"\n{'=' * 30}\n"
-            f"Requested Mode : hybrid\n"
+            f"Requested Mode : {mode}\n"
             f"Actual Mode    : vector   [BM25 unavailable: {fallback_reason}]\n\n"
             f"Vector Search  : {vec_ms:>4} ms   (candidates: {len(vector_results)})\n"
             f"Total Retrieval: {total_ms:>4} ms   (returned: {len(trimmed)})\n"
@@ -280,46 +426,25 @@ def retrieve(
         return trimmed
 
 
-def build_citations(db: Session, retrieved: list[tuple[Document, float]]) -> list[dict]:
+def build_citations(retrieved: list[tuple[Document, float]]) -> list[dict]:
     """
     Turns retrieve()'s output into the internal citation shape:
     [{document_id, document_name, page_number, chunk_index, chunk_text, score}, ...]
 
-    Phase 4 update: prefers document_name from Chroma metadata (stored
-    there since Phase 4 ingestion). Only performs the Postgres bulk lookup
-    for chunks that are missing the field — i.e. documents ingested before
-    Phase 4. Over time, as collections are re-uploaded, the Postgres path
-    becomes unused.
+    retrieve() has already verified eligibility and attached the SQL filename.
 
     document_id/chunk_index are kept in this internal shape (stripped by
     to_public()) so chat_service can reconstruct a stable chunk identifier
     for query_logs without a second round-trip.
     """
-    if not retrieved:
-        return []
-
-    # Separate chunks that already carry document_name from those that don't.
-    need_pg: list[str] = []   # document_ids that need Postgres resolution
-    for doc, _ in retrieved:
-        if not doc.metadata.get("document_name"):
-            need_pg.append(doc.metadata["document_id"])
-
-    filename_by_id: dict[str, str] = {}
-    if need_pg:
-        doc_uuids = [uuid.UUID(did) for did in set(need_pg)]
-        docs = document_repository.get_by_ids(db, doc_uuids)
-        filename_by_id = {str(d.id): d.filename for d in docs}
-
     citations = []
     for doc, score_or_dist in retrieved:
         m = doc.metadata
-        # In vector mode, retrieve() returns cosine distance → convert to similarity.
-        # In hybrid mode, it returns the raw RRF score. RRF scores are in [0, 2/(k+1)]
-        # with k = BM25_RRF_K (default 60 → max ≈ 0.0328). They are NOT in [0, 1], so
-        # they would all fall below MIN_CITATION_SCORE (0.05) and be filtered out by
-        # filter_citations(), causing every hybrid query to return "not found".
-        # Normalize by the theoretical max (2 result lists × 1/(k+1)) to map to [0, 1].
-        if m.get("_retrieval_mode") == "hybrid":
+        if m.get("_retrieval_mode") == "hybrid_rerank" and m.get("_rerank_score") is not None:
+            import math
+            logit = float(score_or_dist)
+            score = round(1.0 / (1.0 + math.exp(-logit)), 4)
+        elif m.get("_retrieval_mode") in ("hybrid", "hybrid_rerank"):
             max_rrf = 2.0 / (settings.BM25_RRF_K + 1)
             score = round(min(float(score_or_dist) / max_rrf, 1.0), 4)
         else:
@@ -329,10 +454,7 @@ def build_citations(db: Session, retrieved: list[tuple[Document, float]]) -> lis
         citations.append(
             {
                 "document_id":   m["document_id"],
-                "document_name": (
-                    m.get("document_name")
-                    or filename_by_id.get(m["document_id"], "unknown document")
-                ),
+                "document_name": m["document_name"],
                 "page_number":   m["page_number"],
                 "chunk_index":   m["chunk_index"],
                 "chunk_text":    doc.page_content,

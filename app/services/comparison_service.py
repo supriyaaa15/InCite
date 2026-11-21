@@ -14,10 +14,10 @@ responsibility.  This service receives pre-retrieved citations and focuses on:
 
 Public API
 ----------
-recommend(question, citations, history, available_document_names)
+recommend(question, citations, recent_user_messages, available_document_names)
   → tuple[str, list[RecommendedDocument], list[str]]
 
-compare(question, citations, history, all_document_names)
+compare(question, citations, recent_user_messages, all_document_names)
   → tuple[str, list[ComparisonSection], list[str]]
 
 Both functions return ("", [], []) on any failure — never raises, so chat
@@ -139,7 +139,7 @@ def _cap_per_document(grouped: dict[str, list[dict]], n: int = 5) -> dict[str, l
 
 def _resolve_target_documents(
     message: str,
-    history: list[dict],
+    recent_user_messages: list[str],
     grouped: dict[str, list[dict]],
 ) -> list[str] | None:
     """
@@ -151,39 +151,31 @@ def _resolve_target_documents(
     --------
     1. Explicit names in the message: look for filename substrings
        (case-insensitive, with and without extension).
-    2. Implicit reference ("the first two", "both", "them"): scan the last
-       assistant message in history for document names.
+    2. Implicit reference ("the first two", "both", "them"): look for names
+       in recent user messages, starting with the newest.
     3. Unresolvable → return None.
     """
-    available = list(grouped.keys())
-    msg_lower = message.lower()
+    document_names = [(name, name.lower(), name.lower().rsplit(".", 1)[0]) for name in grouped]
+
+    def mentioned_documents(text: str) -> list[str]:
+        text = text.lower()
+        return [name for name, filename, stem in document_names if filename in text or stem in text]
 
     # 1. Explicit — filename substring present in the message
-    named = []
-    for doc in available:
-        doc_lower = doc.lower()
-        stem = doc_lower.rsplit(".", 1)[0]  # strip extension for matching
-        if doc_lower in msg_lower or stem in msg_lower:
-            named.append(doc)
+    named = mentioned_documents(message)
     if len(named) >= 2:
         return named
 
-    # 2. Implicit — message uses a reference word and the last assistant
-    #    message named specific documents
+    # 2. Implicit — use an earlier user message that names the documents.
     _IMPLICIT_MARKERS = frozenset(
         ["first", "second", "third", "both", "them", "those", "these", "the two"]
     )
+    msg_lower = message.lower()
     if any(marker in msg_lower for marker in _IMPLICIT_MARKERS):
-        for turn in reversed(history):
-            if turn.get("role") == "assistant":
-                content_lower = turn["content"].lower()
-                mentioned = [
-                    doc for doc in available
-                    if doc.lower() in content_lower or doc.lower().rsplit(".", 1)[0] in content_lower
-                ]
-                if len(mentioned) >= 2:
-                    return mentioned[:2]
-                break  # only check the most recent assistant message
+        for user_message in reversed(recent_user_messages):
+            mentioned = mentioned_documents(user_message)
+            if len(mentioned) >= 2:
+                return mentioned[:2]
 
     # 3. Cannot determine with confidence
     return None
@@ -244,13 +236,12 @@ def _llm_structured_call(prompt: str, schema: type):
     raise last_exc or RuntimeError("All configured LLM models are unavailable")
 
 
-def _build_history_block(history: list[dict], max_turns: int = 4) -> str:
-    """Formats recent conversation history into the prompt prefix."""
-    if not history:
+def _build_history_block(recent_user_messages: list[str]) -> str:
+    """Format prior user requests separately from retrieved evidence."""
+    if not recent_user_messages:
         return ""
-    recent = history[-max_turns:]
-    turns = "\n".join(f"{h['role'].capitalize()}: {h['content']}" for h in recent)
-    return f"Conversation so far:\n{turns}\n\n"
+    turns = "\n".join(f"User: {message}" for message in recent_user_messages)
+    return f"Earlier user messages:\n{turns}\n\n"
 
 
 def _validate_followups(raw: list[str]) -> list[str]:
@@ -275,7 +266,7 @@ def _validate_followups(raw: list[str]) -> list[str]:
 def recommend(
     question: str,
     citations: list[dict],
-    history: list[dict],
+    recent_user_messages: list[str],
     available_document_names: list[str],
 ) -> tuple[str, list[RecommendedDocument], list[str]]:
     """
@@ -289,8 +280,8 @@ def recommend(
     available_document_names
         All ready documents in the collection.  Used to provide context to
         the LLM even if some documents returned no high-scoring chunks.
-    history
-        Prior conversation turns for context.
+    recent_user_messages
+        Earlier user requests for resolving preferences or references.
 
     Returns (summary_message, ranked_documents, follow_up_questions).
     Returns ("", [], []) on any exception — never raises.
@@ -308,12 +299,13 @@ def recommend(
             doc_blocks.append(f"Document: {doc_name}\n{chunk_text}")
         context = "\n\n---\n\n".join(doc_blocks)
 
-        history_block = _build_history_block(history)
+        history_block = _build_history_block(recent_user_messages)
 
         prompt = f"""{history_block}The user is asking for a document recommendation.
 
 User request: "{question}"
 
+Use earlier user messages only to understand the request and resolve references.
 Below are excerpts from each document in this collection. Use ONLY this \
 content to evaluate and rank the documents.
 
@@ -370,7 +362,7 @@ Task:
 def compare(
     question: str,
     citations: list[dict],
-    history: list[dict],
+    recent_user_messages: list[str],
     all_document_names: list[str],
 ) -> tuple[str, list[ComparisonSection], list[str]]:
     """
@@ -380,7 +372,7 @@ def compare(
     message is a plain-text summary always shown in the chat bubble.
     comparison_sections is the structured breakdown shown as formatted cards.
 
-    When target documents cannot be resolved from the message or history,
+    When target documents cannot be resolved from current or prior user messages,
     returns a clarification request with an empty sections list.
     Returns ("", [], []) on any other exception — never raises.
     """
@@ -388,7 +380,7 @@ def compare(
         grouped = _group_by_document(citations)
 
         # Resolve which documents the user wants to compare
-        target_docs = _resolve_target_documents(question, history, grouped)
+        target_docs = _resolve_target_documents(question, recent_user_messages, grouped)
 
         if target_docs is None:
             # Cannot determine with confidence — ask for clarification
@@ -427,13 +419,14 @@ def compare(
             doc_blocks.append(f"Document: {doc_name}\n{chunk_text}")
         context = "\n\n---\n\n".join(doc_blocks)
 
-        history_block = _build_history_block(history)
+        history_block = _build_history_block(recent_user_messages)
         doc_labels = " and ".join(target_docs)
 
         prompt = f"""{history_block}The user wants a comparison between documents.
 
 User request: "{question}"
 
+Use earlier user messages only to understand the request and resolve references.
 Documents being compared:
 {context}
 

@@ -17,8 +17,10 @@ PyMuPDF==1.24.10
 langchain==0.3.4
 langchain-community==0.3.2
 langchain-chroma==0.1.4
+langchain-groq==0.3.2
+# Legacy Gemini packages are retained pending a separate dependency review.
 langchain-google-genai==2.1.5
-google-genai>=1.3.0  # used directly by scripts/test_rag.py, not the deployed app
+google-genai>=1.3.0
 
 # CPU-only torch — default PyPI wheels on Linux bundle full CUDA support
 # (unlike Windows/Mac, which get CPU-only by default). Render's free tier

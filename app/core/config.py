@@ -30,13 +30,14 @@ class Settings(BaseSettings):
     TOP_K: int = 5
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
 
-    # Hybrid retrieval (Phase 4). RETRIEVAL_MODE controls whether BM25 + RRF
-    # is used alongside vector search. "vector" = existing behaviour (default,
-    # safe for all deployments). "hybrid" = BM25 + Chroma vector + RRF fusion.
-    # BM25_RRF_K is the Reciprocal Rank Fusion constant (60 is the TREC standard
-    # and performs well without per-dataset tuning).
-    RETRIEVAL_MODE: str = "vector"   # "vector" | "hybrid"
+    # Hybrid retrieval (Phase 4 & Phase 6). RETRIEVAL_MODE controls whether
+    # BM25 + RRF and CrossEncoder reranking are used alongside vector search.
+    # "vector" = vector search only. "hybrid" = BM25 + Chroma vector + RRF.
+    # "hybrid_rerank" = BM25 + Chroma vector + RRF (top-15) + CrossEncoder rerank.
+    RETRIEVAL_MODE: str = "vector"   # "vector" | "hybrid" | "hybrid_rerank"
     BM25_RRF_K: int = 60
+    RERANK_POOL_K: int = 15
+    RERANKER_MODEL: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
     # Confidence-aware RAG (Days 28-29, recalibrated Day 30). Two
     # boundaries, not one — see docs/design-decisions.md for why a single
@@ -52,14 +53,12 @@ class Settings(BaseSettings):
     HIGH_CONFIDENCE_THRESHOLD: float = 0.45  # best surviving score at or
     # above this: confidence="high". Between the two: confidence="medium".
 
-    # LLM
-    GOOGLE_API_KEY: str  # required — no default, app won't start without it in .env
-    LLM_MODEL: str = "gemini-2.5-flash"
+    # LLM — Groq provider
+    GROQ_API_KEY: str  # required — no default, app won't start without it in .env
+    LLM_MODEL: str = "openai/gpt-oss-120b"
     # Comma-separated, tried in order if LLM_MODEL hits a quota/rate limit
-    # or a transient error. Free-tier Gemini models can have very low daily
-    # request caps (as low as 20/day on some preview models) — a single
-    # model with no fallback means the whole app goes down once that's hit.
-    LLM_FALLBACK_MODELS: str = "gemini-2.5-flash,gemini-2.0-flash"
+    # or a transient error. Each model is attempted via chat_service._invoke_with_fallback().
+    LLM_FALLBACK_MODELS: str = "openai/gpt-oss-20b,qwen/qwen3.8-27b"
 
     # Storage
     UPLOAD_DIR: str = "./uploads"

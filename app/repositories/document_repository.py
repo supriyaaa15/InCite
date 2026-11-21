@@ -1,5 +1,6 @@
 import uuid
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.document import Document, DocumentStatus
@@ -23,9 +24,20 @@ def get_by_id(db: Session, document_id: uuid.UUID) -> Document | None:
 
 
 def get_by_ids(db: Session, document_ids: list[uuid.UUID]) -> list[Document]:
-    """Bulk lookup — used when building citations, so we do one query for
-    all documents referenced in a retrieval result, not one query per chunk."""
+    """Bulk lookup for the legacy BM25 filename resolution path."""
     return db.query(Document).filter(Document.id.in_(document_ids)).all()
+
+
+def get_ready_document_names(
+    db: Session, collection_id: uuid.UUID, document_ids: set[uuid.UUID]
+) -> dict[uuid.UUID, str]:
+    """Return current filenames for the ready candidates in this collection."""
+    statement = select(Document.id, Document.filename).where(
+        Document.id.in_(document_ids),
+        Document.collection_id == collection_id,
+        Document.status == DocumentStatus.ready,
+    )
+    return {document_id: filename for document_id, filename in db.execute(statement)}
 
 
 def list_by_collection(db: Session, collection_id: uuid.UUID) -> list[Document]:
