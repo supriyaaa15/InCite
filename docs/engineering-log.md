@@ -52,3 +52,105 @@ The benchmark CLI now requires `--questions` with a labeled JSON file and valida
 The standalone Gemini and remote-Chroma smoke script was retired because the project now uses Groq and embedded Chroma. The legacy Gemini dependencies remain pending a separate dependency review. Vector search remains the configured default, with independent hybrid RRF and CrossEncoder reranking available as options.
 
 The final rerun passed all 81 native unit tests and all 11 PostgreSQL 16.14 and Chroma 0.5.15 integration tests, with zero failures, errors, or skips. Pytest reported the same Pydantic and Starlette/AnyIO deprecation warnings. Benchmark import and help worked without application credentials. Twelve invalid CLI inputs exited with usage errors. A synthetic retrieval adapter exercised the benchmark's single-mode run, three-mode comparison, scoring, and report. No live benchmark corpus or Groq endpoint was used.
+
+## Reliable deletion foundation
+
+Document and collection DELETE now commit a durable request and return
+`202 Accepted` with `cleanup_pending`. Pending documents and collections
+are excluded from retrieval. Archived collections reject uploads and new
+chat turns. Owner-only chat history is retained. Phase 1A's prompt and
+retrieval safety checks still apply. Physical cleanup remains pending.
+See [ADR 002](decisions/002-reliable-deletion-lifecycle.md) for the state
+and transaction boundaries.
+
+The disposable PostgreSQL 16.14 and Chroma 0.5.15 runner passed 82 native
+unit tests (81 previous, one new) and 21 integration cases (11 previous,
+10 new) with zero failures or skips. The migration upgraded a database
+seeded at revision `b2c3d4e5f6a7` and preserved the ready fixture. The tests
+covered authorization, duplicates, failed SQL, all retrieval modes,
+retained history, and deletion during upload registration and ingestion.
+Only synthetic data and fake model adapters were used. Pytest reported
+two unit and six integration dependency deprecation warnings.
+
+Both edited frontend pages passed JSX parsing. The full frontend build
+could not run because no Node.js version was configured.
+
+## Physical deletion and recovery
+
+The FastAPI worker discovers pending requests in PostgreSQL on startup and
+polls every two seconds. It removes matching Chroma vectors, invalidates
+BM25, and removes the original PDF from the verified upload directory.
+Only then does a short PostgreSQL transaction delete the document and its
+chunk rows. Collection cleanup waits for all document rows to be removed,
+then removes the collection's Chroma index and empty upload directory.
+Archived collection metadata and authorized chat history remain available.
+
+The migration adds durable attempt counts, retry times, and failed-step
+labels. Retry delays start at five seconds and cap at five minutes. A
+restart resumes pending work, including requests interrupted after an
+external deletion. Missing artifacts count as success. Ambiguous paths,
+conflicting vector identities, and unregistered files remain for manual
+review. The worker does not hold a database transaction during Chroma or
+filesystem I/O.
+
+Upload, ingestion, and cleanup share a per-collection OS file lock. An
+ingestion write can finish after DELETE is accepted, but cleanup cannot
+finish while that writer holds the lock. The embedded Chroma deployment
+supports one application process per persistent store. Before rollout,
+stop old writers and apply `alembic upgrade head` before starting the
+upgraded application. See [ADR 002](decisions/002-reliable-deletion-lifecycle.md)
+for transaction boundaries, retry behavior, and deployment limits.
+
+Run both suites from the repository root in PowerShell.
+
+```powershell
+.\.venv\Scripts\python.exe -B scripts/run_phase1a_integration.py --unit
+.\.venv\Scripts\python.exe -B scripts/run_phase1a_integration.py
+```
+
+The final run passed **83 unit tests** and **32 integration cases** with
+zero failures, errors, or skips. Pytest reported two unit and six
+integration dependency deprecation warnings. The integration runner used
+disposable PostgreSQL 16.14, Chroma 0.5.15 with temporary persistence,
+temporary uploaded PDFs, synthetic records, and fake model adapters. It
+removed the disposable container and scratch data after testing.
+
+The tests checked PostgreSQL, Chroma, and file contents after deletion,
+including neighboring collection isolation, missing artifacts, retry after
+errors before and after external operations, and a failed PostgreSQL
+finalization. They exercised a Chroma write finishing after DELETE was
+accepted, followed by cleanup, and recovery during a fresh FastAPI
+lifespan. A separate Windows subprocess test verified OS lock release on
+abrupt process exit. Full application restart and POSIX lock verification
+were still open at that point.
+
+## Cleanup scheduling and deployment verification
+
+A busy collection reproduced starvation by occupying all 16 document slots
+on repeated passes. The worker now defers busy targets for four seconds
+using the existing retry timestamp. It keeps their failure count and last
+error. The regression runs the actual worker with PostgreSQL, Chroma, and
+temporary PDFs. The seventeenth document finishes while the original 16
+remain locked. After release and expiry, the worker cleans all 16.
+Against an isolated copy of `a19fdb3`, the same test failed at the expected
+assertion because the seventeenth document was still pending on the next pass.
+
+The PowerShell commands above passed **83 unit tests** and **33 integration
+tests**, with zero failures, errors, or skips. Pytest reported two unit and
+six integration dependency deprecation warnings. The disposable stack used
+PostgreSQL 16.14 and Chroma 0.5.15.
+
+The existing cross-process lock test passed in a Linux Docker container.
+The previous Linux check also verified release after `SIGKILL`. The previous
+Windows Uvicorn crash test terminated the app after vector and PDF removal
+and before SQL finalization. Restart completed cleanup against the same
+disposable stores and preserved neighboring artifacts. Graceful shutdown
+waited for its active pass. Full Linux application crash recovery and a
+kill during a Chroma operation remain unverified.
+
+The image command pins one worker even with `WEB_CONCURRENCY=4`. A BuildKit
+probe copied a synthetic context and confirmed 25 private or generated paths
+were excluded and 11 intended paths were retained. The full backend image
+dependency build was outside this check. The deployment guide now places
+backup and migration confirmation before startup, followed by readiness and
+cleanup verification. No existing database was migrated.

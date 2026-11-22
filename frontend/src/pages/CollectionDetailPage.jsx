@@ -101,7 +101,9 @@ export default function CollectionDetailPage() {
   }
 
   async function handleDeleteDocument(documentId, filename) {
-    const confirmed = window.confirm(`Delete "${filename}"? This can't be undone.`);
+    const confirmed = window.confirm(
+      `Request deletion of "${filename}"? It will be hidden from search. Its PDF and stored chunks remain pending cleanup.`,
+    );
     if (!confirmed) return;
 
     // If this document was still being polled (mid-ingestion), stop that

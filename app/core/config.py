@@ -62,6 +62,7 @@ class Settings(BaseSettings):
 
     # Storage
     UPLOAD_DIR: str = "./uploads"
+    DELETION_CLEANUP_ENABLED: bool = True
 
     # Upload validation limits — override via env vars in production.
     # MAX_UPLOAD_SIZE_MB: hard cap on raw file size before any processing.

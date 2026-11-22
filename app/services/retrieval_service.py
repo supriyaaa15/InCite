@@ -7,12 +7,13 @@ import time
 import uuid
 from typing import Optional
 
+from chromadb.errors import InvalidCollectionException
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.core.chroma_client import get_chroma_client, get_collection_store
+from app.core.chroma_client import get_chroma_client, get_existing_collection_store
 from app.core.config import settings
 from app.core.embeddings import get_langchain_embeddings
 from app.repositories import document_repository
@@ -45,6 +46,7 @@ def _get_vectorstore(collection_id: uuid.UUID) -> Chroma:
         client=get_chroma_client(),
         collection_name=f"collection_{collection_id}",
         embedding_function=get_langchain_embeddings(),
+        create_collection_if_not_exists=False,
     )
 
 
@@ -99,8 +101,11 @@ def _vector_retrieve(
         metadata (document_id, page_number, chunk_index), which is the exact
         format written during ingestion.
     """
-    vectorstore = _get_vectorstore(collection_id)
-    results = vectorstore.similarity_search_with_score(query_text, k=top_k)
+    try:
+        vectorstore = _get_vectorstore(collection_id)
+        results = vectorstore.similarity_search_with_score(query_text, k=top_k)
+    except InvalidCollectionException:
+        return [], {}
 
     lookup: dict[str, tuple[Document, float]] = {}
     for doc, dist in results:
@@ -131,7 +136,9 @@ def _bm25_retrieve(
     from app.core import bm25_store
 
     try:
-        raw_collection = get_collection_store(str(collection_id))
+        raw_collection = get_existing_collection_store(str(collection_id))
+        if raw_collection is None:
+            return []
         index = bm25_store.get_index(collection_id, raw_collection, db)
         return bm25_store.search(index, query_text, top_n)
     except Exception as exc:
@@ -296,11 +303,11 @@ def retrieve(
         bm25_only_lookup: dict[str, tuple[Document, float]] = {}
         if bm25_only_ids:
             try:
-                raw_collection = get_collection_store(str(collection_id))
+                raw_collection = get_existing_collection_store(str(collection_id))
                 fetched = raw_collection.get(
                     ids=bm25_only_ids,
                     include=["documents", "metadatas"],
-                )
+                ) if raw_collection is not None else {"ids": []}
                 for i, cid in enumerate(fetched["ids"]):
                     text = (fetched["documents"] or [])[i] if i < len(fetched["documents"] or []) else ""
                     meta = (fetched["metadatas"] or [])[i] if i < len(fetched["metadatas"] or []) else {}

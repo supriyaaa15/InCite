@@ -5,11 +5,10 @@ Runs as a FastAPI BackgroundTask, so the HTTP response has already been sent
 by the time this executes.  Uses its own DB session (SessionLocal) because
 the request-scoped session from get_db() is already closed.
 
-Failure guarantee
------------------
-Every execution path ends with the document status set to either
-`ready` or `failed`.  A `failed` document always carries an `error_code`
-and a user-safe `error_message` on the DB row.
+Processing lifecycle
+--------------------
+An active document can finish as `ready` or `failed`. A recorded deletion
+request cancels further SQL writes and leaves existing artifacts for cleanup.
 
 Exception hierarchy caught (in order):
 1. UploadValidationError — raised by secondary checks inside iter_pages,
@@ -26,10 +25,8 @@ Note on OOMKilled / SIGKILL:
 
 Cleanup on failure
 ------------------
-If any chunks have already been written to Chroma or Postgres, they are
-deleted before marking the document as failed.  This prevents accumulation
-of partial embeddings that would corrupt retrieval results.  Cleanup errors
-are logged but never re-raised — the document is always marked failed.
+After marking an active document failed, best-effort cleanup removes any
+partial Chroma and SQL chunks. Errors are logged.
 
 Logging
 -------
@@ -42,7 +39,8 @@ import logging
 import time
 import uuid
 
-from app.core.chroma_client import get_collection_store
+from app.core.chroma_client import get_collection_store, get_existing_collection_store
+from app.core.collection_artifacts import collection_artifact_lock
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.core.embeddings import get_embedder
@@ -56,11 +54,21 @@ logger = logging.getLogger(__name__)
 BATCH_SIZE = 32
 
 
+class IngestionCancelled(Exception):
+    """The document or collection stopped accepting ingestion writes."""
+
+
+def _require_processing(db, document_id):
+    document = document_repository.get_by_id(db, document_id)
+    if document is None or document.status != DocumentStatus.processing:
+        raise IngestionCancelled()
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _flush_batch(db, document, batch: list[dict], batch_number: int, embedder, store):
+def _flush_batch(db, document, batch: list[dict], batch_number: int, embedder):
     texts = [c["content"] for c in batch]
 
     print(f"Encoding batch {batch_number} ({len(texts)} chunks)...")
@@ -86,16 +94,6 @@ def _flush_batch(db, document, batch: list[dict], batch_number: int, embedder, s
         for c in batch
     ]
 
-    t0 = time.perf_counter()
-    store.upsert(
-        ids=batch_ids,
-        embeddings=embeddings,
-        documents=texts,
-        metadatas=batch_metadatas,
-    )
-    chroma_upsert_time = time.perf_counter() - t0
-
-    # -------- Postgres --------
     batch_rows = [
         {
             "document_id": document.id,
@@ -107,14 +105,24 @@ def _flush_batch(db, document, batch: list[dict], batch_number: int, embedder, s
         for c, chroma_id in zip(batch, batch_ids)
     ]
 
-    t0 = time.perf_counter()
-    chunk_repository.bulk_create(db, batch_rows)
-    postgres_insert_time = time.perf_counter() - t0
+    with collection_artifact_lock(document.collection_id):
+        _require_processing(db, document.id)
+        db.rollback()  # End the read transaction before creating or writing Chroma.
+        t0 = time.perf_counter()
+        store = get_collection_store(str(document.collection_id))
+        store.upsert(ids=batch_ids, embeddings=embeddings, documents=texts, metadatas=batch_metadatas)
+        chroma_upsert_time = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        if document_repository.lock_processing(db, document.id, document.collection_id) is None:
+            raise IngestionCancelled()
+        chunk_repository.bulk_create(db, batch_rows)
+        postgres_insert_time = time.perf_counter() - t0
 
     return embedding_time, chroma_upsert_time, postgres_insert_time
 
 
-def _cleanup_partial_data(db, document: Document, store) -> None:
+def _cleanup_partial_data(db, document: Document) -> None:
     """
     Delete any chunks already written for this document from both Chroma and
     Postgres.  Called when ingestion fails mid-way to prevent partial/corrupt
@@ -125,22 +133,13 @@ def _cleanup_partial_data(db, document: Document, store) -> None:
     of whether cleanup succeeds.
     """
     # --- Chroma ---
-    if store is not None:
-        try:
-            existing = store.get(where={"document_id": str(document.id)})
-            ids_to_delete = existing.get("ids", [])
-            if ids_to_delete:
-                store.delete(ids=ids_to_delete)
-                logger.info(
-                    "Cleanup: deleted %d Chroma vectors | document_id=%s",
-                    len(ids_to_delete),
-                    document.id,
-                )
-        except Exception:
-            logger.exception(
-                "Cleanup: failed to delete Chroma vectors | document_id=%s",
-                document.id,
-            )
+    try:
+        with collection_artifact_lock(document.collection_id):
+            store = get_existing_collection_store(str(document.collection_id))
+            if store is not None:
+                store.delete(where={"document_id": str(document.id)})
+    except Exception:
+        logger.exception("Cleanup: failed to delete Chroma vectors | document_id=%s", document.id)
 
     # --- Postgres ---
     try:
@@ -166,20 +165,15 @@ def _mark_failed(
     document: Document | None,
     error_code: UploadErrorCode,
     user_message: str,
-    store,
-    elapsed: float,
 ) -> None:
     """
-    Central failure handler: cleans up partial data, then writes the failed
-    status + error info to the document row.
+    Persist failure for active processing rows before cleaning partial data.
     """
     if document is None:
         return  # deleted before ingestion ran — nothing to do
 
-    _cleanup_partial_data(db, document, store)
-
     try:
-        document_repository.update_status(
+        marked_failed = document_repository.finish_processing(
             db,
             document,
             DocumentStatus.failed,
@@ -187,10 +181,14 @@ def _mark_failed(
             error_message=user_message,
         )
     except Exception:
+        db.rollback()
         logger.exception(
             "Failed to persist failed status | document_id=%s",
             document.id,
         )
+        return
+    if marked_failed:
+        _cleanup_partial_data(db, document)
 
 
 # ---------------------------------------------------------------------------
@@ -213,17 +211,21 @@ def ingest_document(document_id: str) -> None:
 
     db = SessionLocal()
     document: Document | None = None
-    store = None
+    page_iter = None
     total_start = time.perf_counter()
 
     try:
         document = document_repository.get_by_id(db, uuid.UUID(document_id))
-        if document is None:
+        if document is None or document.status != DocumentStatus.processing:
             logger.warning(
                 "Ingestion aborted: document not found (deleted?) | document_id=%s",
                 document_id,
             )
             return
+        # Keep a loaded snapshot for file access and logging even if cleanup
+        # later removes the row. Mutating steps always reload under their guard.
+        db.expunge(document)
+        db.rollback()
 
         logger.info(
             "Ingestion initialised | document_id=%s collection_id=%s filename=%r",
@@ -275,11 +277,10 @@ def ingest_document(document_id: str) -> None:
                         print("Getting embedder...")
                         embedder = get_embedder()
                         print("Embedder loaded")
-                        store = get_collection_store(str(document.collection_id))
 
                     batch_number += 1
                     be, bc, bp = _flush_batch(
-                        db, document, current_batch, batch_number, embedder, store
+                        db, document, current_batch, batch_number, embedder
                     )
                     embedding_time += be
                     chroma_upsert_time += bc
@@ -303,8 +304,6 @@ def ingest_document(document_id: str) -> None:
                 document,
                 UploadErrorCode.NO_EXTRACTABLE_TEXT,
                 "This PDF contains only scanned images. OCR is not currently supported.",
-                store,
-                elapsed,
             )
             return
 
@@ -317,11 +316,10 @@ def ingest_document(document_id: str) -> None:
                 print("Getting embedder...")
                 embedder = get_embedder()
                 print("Embedder loaded")
-                store = get_collection_store(str(document.collection_id))
 
             batch_number += 1
             be, bc, bp = _flush_batch(
-                db, document, batch_buffer, batch_number, embedder, store
+                db, document, batch_buffer, batch_number, embedder
             )
             embedding_time += be
             chroma_upsert_time += bc
@@ -335,9 +333,10 @@ def ingest_document(document_id: str) -> None:
         # Success
         # ------------------------------------------------------------------
         stage_start = time.perf_counter()
-        document_repository.update_status(
+        if not document_repository.finish_processing(
             db, document, DocumentStatus.ready, page_count=page_count
-        )
+        ):
+            raise IngestionCancelled()
         print("6. Status updated")
         status_update_time = time.perf_counter() - stage_start
         total_time = time.perf_counter() - total_start
@@ -363,6 +362,10 @@ def ingest_document(document_id: str) -> None:
     # ------------------------------------------------------------------
     # Structured failure handling
     # ------------------------------------------------------------------
+    except IngestionCancelled:
+        db.rollback()
+        logger.info("Ingestion stopped | document_id=%s", document_id)
+
     except UploadValidationError as exc:
         elapsed = time.perf_counter() - total_start
         logger.warning(
@@ -375,7 +378,7 @@ def ingest_document(document_id: str) -> None:
             elapsed,
         )
         db.rollback()
-        _mark_failed(db, document, exc.error_code, exc.user_message, store, elapsed)
+        _mark_failed(db, document, exc.error_code, exc.user_message)
         # Partial Chroma data was cleaned up by _mark_failed → invalidate
         # the BM25 cache so stale chunks aren't served.
         from app.core import bm25_store
@@ -403,8 +406,6 @@ def ingest_document(document_id: str) -> None:
             UploadErrorCode.RESOURCE_LIMIT,
             "Processing could not complete due to resource constraints. "
             "Please try again or upload a smaller document.",
-            store,
-            elapsed,
         )
         from app.core import bm25_store
         if document is not None:
@@ -428,12 +429,14 @@ def ingest_document(document_id: str) -> None:
             UploadErrorCode.INTERNAL_ERROR,
             "An unexpected error occurred while processing your document. "
             "Please try again. If the problem persists, contact support.",
-            store,
-            elapsed,
         )
         from app.core import bm25_store
         if document is not None:
             bm25_store.invalidate(str(document.collection_id))
 
     finally:
-        db.close()
+        try:
+            if page_iter is not None:
+                page_iter.close()
+        finally:
+            db.close()

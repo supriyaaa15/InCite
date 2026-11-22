@@ -34,6 +34,17 @@ provider call. Prompts use fresh evidence and up to three earlier user messages
 for request context. The authorized transcript still includes assistant replies.
 See [ADR 001](decisions/001-postgresql-document-eligibility.md).
 
+## Deletion lifecycle
+
+PostgreSQL stores deletion intent separately from document ingestion status.
+Active views and retrieval exclude pending documents and collections. The API
+acknowledges the recorded request and retains history. A FastAPI lifespan
+worker discovers due work at startup and periodically thereafter. It removes
+Chroma vectors and verified PDFs before finalizing SQL. Retry state lives in
+PostgreSQL. The supported storage layout uses one application process owning
+the embedded Chroma store and a per-collection OS lock on its local volume.
+See [ADR 002](decisions/002-reliable-deletion-lifecycle.md).
+
 ## External services
 - **LLM API** (Groq via ChatGroq): called by chat_service and comparison_service to generate answers
   from retrieved chunks (migrated from Google Gemini to avoid free-tier request quota limits).
@@ -43,6 +54,16 @@ Single Render web service runs the FastAPI app, with Chroma embedded inside it (
 
 - Backend + Postgres: Render
 - Frontend: Vercel
+- Run one FastAPI process and one replica per embedded Chroma store. The
+  backend image explicitly passes `--workers 1`, including when
+  `WEB_CONCURRENCY` is present. Keep that setting when overriding the command.
+- Stop old writers and back up PostgreSQL, Chroma, and uploads before running
+  `alembic upgrade head` against the intended database. Confirm the revision
+  before starting the new process. Then check app, PostgreSQL, and Chroma
+  readiness and pending cleanup. See the [deployment steps](../README.md#deployment-and-upgrades).
+- The Docker build excludes local configuration and runtime artifacts. Supply
+  credentials at runtime and keep backups and custom storage outside the build
+  context.
 - Chosen over AWS EC2 for setup speed within a 30-day timeline — see
   design-decisions.md for the full reasoning.
   Known trade-off: Chroma's embedded data isn't guaranteed to survive a redeploy unless the persist path is backed by a persistent disk. Accepted for this project — documents can be re-uploaded after a redeploy; not acceptable for a real production system with real users.

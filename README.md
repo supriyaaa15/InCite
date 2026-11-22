@@ -208,20 +208,28 @@ incite/
    ```
    Edit `.env` and configure `GROQ_API_KEY` and `JWT_SECRET`.
 
-3. **Start backend services via Docker Compose**:
+3. **Start PostgreSQL and build the backend image**:
    ```bash
-   docker compose up --build -d
+   docker compose up -d db
+   docker compose build app
    ```
 
-4. **Run database migrations**:
+4. **Migrate and confirm the database revision before starting the app**:
    ```bash
-   docker compose exec app alembic upgrade head
+   docker compose run --rm app alembic upgrade head
+   docker compose run --rm app alembic current
+   docker compose run --rm app alembic heads
    ```
+   Confirm that the current database revision matches the Alembic head.
 
-5. **Verify backend health**:
+5. **Start the backend and verify readiness**:
    ```bash
+   docker compose up -d app
    curl http://localhost:8000/health
+   curl http://localhost:8000/health/db
+   curl http://localhost:8000/health/chroma
    ```
+   Check that each response body reports `"status": "ok"`.
 
 6. **Start the frontend interface**:
    ```bash
@@ -232,6 +240,17 @@ incite/
    Access the web application at `http://localhost:5173`.
 
 > **Note on PostgreSQL Port**: Docker maps container port `5432` to host port `5433` to prevent conflicts with local PostgreSQL instances.
+
+### Deployment and upgrades
+
+1. Stop every old application process that can write to the target stores. For the local Compose stack, use `docker compose stop app` and keep PostgreSQL available.
+2. Back up the intended PostgreSQL database, the Chroma persistent directory or volume, and the upload directory while the old app is stopped. Keep the backups outside the Docker build context.
+3. Build the updated image and run `alembic upgrade head` as a one-off command using the intended database configuration. Compose sets its own local `DATABASE_URL`. For hosted deployments, check the migration job targets the database the new app will use.
+4. Confirm the migration succeeded and that `alembic current` matches `alembic heads` before starting the app.
+5. Start the updated app with **one application process per embedded Chroma store**. The backend image explicitly uses `--workers 1`, which takes precedence over `WEB_CONCURRENCY`. Keep one replica per store and preserve this worker setting if overriding the startup command.
+6. Check the app, database, and Chroma readiness endpoints above. Check cleanup logs and confirm that any known due deletion requests resume. Use a disposable environment and a synthetic document for a deletion smoke test.
+
+The backend build excludes local environment files, uploads, default persistent storage, Git metadata, caches, and test outputs through `.dockerignore`. Supply runtime settings through the deployment environment. Keep private data stored under custom paths outside the build context.
 
 ---
 
