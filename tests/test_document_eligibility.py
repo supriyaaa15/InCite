@@ -157,6 +157,16 @@ class TestDocumentEligibility(unittest.TestCase):
             self.assertEqual(self.retrieve(), [])
         execute.assert_not_called()
 
+    def test_pending_document_and_collection_are_ineligible(self):
+        self.vector_candidates(self.ready, self.second)
+        timestamp = datetime.now(timezone.utc)
+        self.db.get(Document, UUID(self.ready.metadata["document_id"])).delete_requested_at = timestamp
+        self.db.commit()
+        self.assertEqual([doc.page_content for doc, _ in self.retrieve()], ["another"])
+        self.db.get(Collection, self.collection).delete_requested_at = timestamp
+        self.db.commit()
+        self.assertEqual(self.retrieve(), [])
+
     def test_missing_database_session_skips_search(self):
         store = self.vector_candidates(self.ready)
         self.assertEqual(retrieval_service.retrieve(self.collection, "query", None), [])

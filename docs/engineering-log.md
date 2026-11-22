@@ -52,3 +52,25 @@ The benchmark CLI now requires `--questions` with a labeled JSON file and valida
 The standalone Gemini and remote-Chroma smoke script was retired because the project now uses Groq and embedded Chroma. The legacy Gemini dependencies remain pending a separate dependency review. Vector search remains the configured default, with independent hybrid RRF and CrossEncoder reranking available as options.
 
 The final rerun passed all 81 native unit tests and all 11 PostgreSQL 16.14 and Chroma 0.5.15 integration tests, with zero failures, errors, or skips. Pytest reported the same Pydantic and Starlette/AnyIO deprecation warnings. Benchmark import and help worked without application credentials. Twelve invalid CLI inputs exited with usage errors. A synthetic retrieval adapter exercised the benchmark's single-mode run, three-mode comparison, scoring, and report. No live benchmark corpus or Groq endpoint was used.
+
+## Reliable deletion foundation
+
+Document and collection DELETE now commit a durable request and return
+`202 Accepted` with `cleanup_pending`. Pending documents and collections
+are excluded from retrieval. Archived collections reject uploads and new
+chat turns. Owner-only chat history is retained. Phase 1A's prompt and
+retrieval safety checks still apply. Physical cleanup remains pending.
+See [ADR 002](decisions/002-reliable-deletion-lifecycle.md) for the state
+and transaction boundaries.
+
+The disposable PostgreSQL 16.14 and Chroma 0.5.15 runner passed 82 native
+unit tests (81 previous, one new) and 21 integration cases (11 previous,
+10 new) with zero failures or skips. The migration upgraded a database
+seeded at revision `b2c3d4e5f6a7` and preserved the ready fixture. The tests
+covered authorization, duplicates, failed SQL, all retrieval modes,
+retained history, and deletion during upload registration and ingestion.
+Only synthetic data and fake model adapters were used. Pytest reported
+two unit and six integration dependency deprecation warnings.
+
+Both edited frontend pages passed JSX parsing. The full frontend build
+could not run because no Node.js version was configured.

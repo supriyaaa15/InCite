@@ -1,7 +1,8 @@
 import enum
 import uuid
+from datetime import datetime
 
-from sqlalchemy import Enum, ForeignKey, Integer, String, Text
+from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -31,6 +32,7 @@ class Document(TimestampedUUIDBase):
     # document completed successfully.
     error_code: Mapped[str | None] = mapped_column(String, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    delete_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     collection: Mapped["Collection"] = relationship(back_populates="documents")
     chunks: Mapped[list["Chunk"]] = relationship(

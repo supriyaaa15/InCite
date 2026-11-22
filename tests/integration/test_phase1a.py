@@ -46,14 +46,16 @@ if not (
     raise RuntimeError("Integration tests require the disposable settings from the Phase 1A runner.")
 
 from app.core.chroma_client import get_collection_store
+from app.api import document_routes
 from app.core.config import settings
 from app.core.database import SessionLocal, engine
 from app.core.security import create_access_token
 from app.main import app
-from app.models import ChatSession, Collection, Document, Message, User
+from app.models import ChatSession, Chunk, Collection, Document, Message, User
 from app.models.chat import MessageRole
 from app.models.document import DocumentStatus
-from app.services import chat_service, comparison_service, retrieval_service
+from app.repositories import document_repository
+from app.services import chat_service, comparison_service, deletion_service, ingestion_service, retrieval_service
 
 
 QUESTIONS = ("What do the notes explain?", "Compare alpha.pdf and beta.pdf", "Which PDF should I read?")
@@ -83,7 +85,24 @@ def migrated_database():
     config = Config(str(repo / "alembic.ini"))
     config.set_main_option("script_location", str(repo / "alembic").replace("%", "%%"))
     try:
+        command.upgrade(config, "b2c3d4e5f6a7")
+        user_id, collection_id, doc_id = uuid4(), uuid4(), uuid4()
+        with engine.begin() as connection:
+            connection.execute(text(
+                "INSERT INTO users (id, email, hashed_password) VALUES (:id, 'migration@example.test', 'synthetic')"
+            ), {"id": user_id})
+            connection.execute(text(
+                "INSERT INTO collections (id, user_id, name) VALUES (:id, :user_id, 'Existing')"
+            ), {"id": collection_id, "user_id": user_id})
+            connection.execute(text(
+                "INSERT INTO documents (id, collection_id, filename, file_path, status) "
+                "VALUES (:id, :collection_id, 'existing.pdf', 'synthetic.pdf', 'ready')"
+            ), {"id": doc_id, "collection_id": collection_id})
         command.upgrade(config, "head")
+        with SessionLocal() as db:
+            assert document_repository.get_ready_document_names(db, collection_id, {doc_id}) == {doc_id: "existing.pdf"}
+            collection = db.get(Collection, collection_id)
+            assert collection.delete_requested_at is None and collection.cleanup_completed_at is None
         print(f"\nVerified {identity[4]}")
         print(f"Chroma {chromadb.__version__}: PersistentClient, temporary storage, cosine, 2D embeddings")
         yield
@@ -200,6 +219,176 @@ def names(results):
 
 def auth(user_id):
     return {"Authorization": f"Bearer {create_access_token(str(user_id))}"}
+
+
+def test_document_deletion_is_owned_durable_and_repeatable(corpus):
+    document_id, chunk_id = corpus.chunks["alpha"]
+    pdf = scratch / "uploads" / f"{document_id}.pdf"
+    pdf.parent.mkdir(exist_ok=True)
+    pdf.write_bytes(b"synthetic PDF artifact")
+    document = corpus.db.get(Document, document_id)
+    document.file_path = str(pdf)
+    chunk = Chunk(document_id=document_id, page_number=1, chunk_index=0,
+                  content="Synthetic chunk", chroma_id=chunk_id)
+    corpus.db.add(chunk)
+    corpus.db.commit()
+    chunk_row_id = chunk.id
+    url = f"/documents/{document_id}"
+    headers = auth(corpus.owner_id)
+    with TestClient(app) as client:
+        assert client.delete(url, headers=auth(corpus.other_user_id)).status_code == 404
+        corpus.db.refresh(document)
+        assert document.delete_requested_at is None
+        result = client.delete(url, headers=headers)
+        assert result.status_code == 202 and result.json() == {"status": "cleanup_pending"}
+        corpus.db.refresh(document)
+        original_request = document.delete_requested_at
+        assert original_request is not None
+        assert client.delete(url, headers=headers).json() == result.json()
+        assert client.get(url, headers=headers).status_code == 404
+        listed = client.get(f"/collections/{corpus.collection_id}/documents", headers=headers).json()
+        assert str(document_id) not in {row["id"] for row in listed}
+    corpus.db.refresh(document)
+    assert document.delete_requested_at == original_request
+    assert document.status == DocumentStatus.ready
+    assert pdf.exists() and corpus.store.get(ids=[chunk_id])["ids"] == [chunk_id]
+    assert corpus.db.get(Chunk, chunk_row_id) is not None
+
+
+@pytest.mark.parametrize("mode", ["vector", "hybrid", "hybrid_rerank"])
+def test_pending_document_never_supplies_evidence(corpus, monkeypatch, mode):
+    document_id, chunk_id = corpus.chunks["alpha"]
+    deletion_service.request_deletion(corpus.db, corpus.owner_id, document_id=document_id)
+    monkeypatch.setattr(settings, "RETRIEVAL_MODE", mode)
+    ranked = []
+
+    def predict(pairs):
+        ranked.extend(pairs)
+        return [1.0] * len(pairs)
+
+    monkeypatch.setattr(retrieval_service, "_get_reranker", lambda model: SimpleNamespace(predict=predict))
+    result = retrieval_service.retrieve(corpus.collection_id, "glacier", corpus.db, top_k=5)
+    assert names(result) == {"beta.pdf"}
+    assert corpus.store.get(ids=[chunk_id])["ids"] == [chunk_id]
+    if mode == "hybrid_rerank":
+        assert ranked == [("glacier", "Synthetic beta evidence. glacier")]
+
+
+def test_pending_collection_rejects_new_work_and_preserves_history(corpus, provider):
+    url = f"/collections/{corpus.collection_id}"
+    headers = auth(corpus.owner_id)
+    with TestClient(app) as client:
+        assert client.delete(url, headers=auth(corpus.other_user_id)).status_code == 404
+        first = client.delete(url, headers=headers)
+        assert first.status_code == 202 and first.json() == {"status": "cleanup_pending"}
+        with SessionLocal() as fresh:
+            collection = fresh.get(Collection, corpus.collection_id)
+            requested_at = collection.delete_requested_at
+            assert requested_at is not None and collection.cleanup_completed_at is None
+        assert client.delete(url, headers=headers).status_code == 202
+        assert client.get(url, headers=headers).status_code == 404
+        listed = client.get("/collections", headers=headers).json()
+        assert {row["id"] for row in listed} == {str(corpus.second_owned_id)}
+        assert client.post(f"{url}/chat", headers=headers, json={"message": QUESTIONS[0]}).status_code == 404
+        omitted_upload = client.post(f"{url}/documents", headers=headers, files={"file": ("dummy.pdf", b"dummy")})
+        assert omitted_upload.status_code == 404
+        history = f"/sessions/{corpus.session_id}/messages"
+        assert [row["content"] for row in client.get(history, headers=headers).json()] == [RECENT_USER, OLD_ASSISTANT]
+        assert client.get(history, headers=auth(corpus.other_user_id)).status_code == 404
+    with SessionLocal() as fresh:
+        assert fresh.get(Collection, corpus.collection_id).delete_requested_at == requested_at
+        assert fresh.get(Document, corpus.chunks["alpha"][0]).delete_requested_at is None
+        assert retrieval_service.retrieve(corpus.collection_id, "glacier", fresh) == []
+    assert provider == []
+
+
+def test_failed_deletion_transaction_leaves_document_active(corpus):
+    document_id, _ = corpus.chunks["alpha"]
+
+    def fail_update(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("UPDATE documents SET delete_requested_at"):
+            return "SELECT 1 / 0", {}
+        return statement, parameters
+
+    event.listen(engine, "before_cursor_execute", fail_update, retval=True)
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.delete(f"/documents/{document_id}", headers=auth(corpus.owner_id))
+            assert response.status_code == 500
+    finally:
+        event.remove(engine, "before_cursor_execute", fail_update)
+    with SessionLocal() as fresh:
+        assert fresh.get(Document, document_id).delete_requested_at is None
+        assert document_repository.get_ready_document_names(fresh, corpus.collection_id, {document_id}) == {
+            document_id: "alpha.pdf"
+        }
+
+
+@pytest.mark.parametrize("target", ["document", "collection"])
+def test_stale_worker_cannot_publish_ready(corpus, target):
+    document_id, _ = corpus.chunks["processing"]
+    document = corpus.db.get(Document, document_id)
+    args = {"document_id": document_id} if target == "document" else {"collection_id": corpus.collection_id}
+    with SessionLocal() as separate:
+        deletion_service.request_deletion(separate, corpus.owner_id, **args)
+    assert document.status == DocumentStatus.processing
+    assert not document_repository.finish_processing(corpus.db, document, DocumentStatus.ready, page_count=1)
+    with SessionLocal() as fresh:
+        assert fresh.get(Document, document_id).status == DocumentStatus.processing
+
+
+def test_in_flight_chroma_batch_cannot_register_sql_chunks_after_delete(corpus, monkeypatch):
+    document_id, _ = corpus.chunks["processing"]
+    calls = []
+
+    def upsert(**kwargs):
+        corpus.store.upsert(**kwargs)
+        calls.extend(kwargs["ids"])
+        with SessionLocal() as separate:
+            separate.execute(text("SET LOCAL lock_timeout = '2s'"))
+            deletion_service.request_deletion(separate, corpus.owner_id, document_id=document_id)
+
+    def pages(path):
+        yield 1, "An embedding batch written while deletion is requested."
+
+    monkeypatch.setattr(ingestion_service, "get_collection_store", lambda key: SimpleNamespace(upsert=upsert))
+    monkeypatch.setattr(ingestion_service, "iter_pages", pages)
+    monkeypatch.setattr(ingestion_service, "get_embedder", lambda: SimpleNamespace(
+        encode=lambda texts: SimpleNamespace(tolist=lambda: [[1.0, 0.0] for _ in texts]),
+    ))
+    ingestion_service.ingest_document(str(document_id))
+    assert calls and corpus.store.get(ids=calls)["ids"] == calls
+    with SessionLocal() as fresh:
+        document = fresh.get(Document, document_id)
+        assert document.delete_requested_at is not None and document.status == DocumentStatus.processing
+        assert fresh.scalar(select(Chunk.id).where(Chunk.document_id == document_id)) is None
+
+
+def test_upload_rechecks_collection_after_validation(corpus, monkeypatch):
+    pdf = scratch / "uploads" / f"{uuid4()}.pdf"
+
+    def save_file(*args):
+        pdf.parent.mkdir(exist_ok=True)
+        pdf.write_bytes(b"unregistered synthetic upload")
+        return str(pdf)
+
+    def validate(path):
+        with SessionLocal() as separate:
+            separate.execute(text("SET LOCAL lock_timeout = '2s'"))
+            deletion_service.request_deletion(separate, corpus.owner_id, collection_id=corpus.collection_id)
+
+    monkeypatch.setattr(document_routes.storage_service, "save_file", save_file)
+    monkeypatch.setattr(document_routes, "validate_upload", lambda file: None)
+    monkeypatch.setattr(document_routes, "validate_pdf_file", validate)
+    with TestClient(app) as client:
+        result = client.post(f"/collections/{corpus.collection_id}/documents", headers=auth(corpus.owner_id),
+                             files={"file": ("racing.pdf", b"synthetic")})
+    assert result.status_code == 404
+    assert not pdf.exists()
+    with SessionLocal() as fresh:
+        assert fresh.scalar(select(Document.id).where(
+            Document.collection_id == corpus.collection_id, Document.filename == "racing.pdf"
+        )) is None
 
 
 def test_vector_filters_stale_and_cross_collection_chunks(corpus, monkeypatch):

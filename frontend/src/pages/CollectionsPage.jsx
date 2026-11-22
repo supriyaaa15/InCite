@@ -50,7 +50,7 @@ export default function CollectionsPage() {
   async function handleDelete(e, collectionId, name) {
     e.stopPropagation(); // don't also trigger the card's navigate
     const confirmed = window.confirm(
-      `Delete "${name}"? This permanently deletes every document and chat inside it.`,
+      `Request deletion of "${name}"? It will disappear from your active collections. Files and stored chunks remain pending cleanup. Existing chats are retained.`,
     );
     if (!confirmed) return;
 

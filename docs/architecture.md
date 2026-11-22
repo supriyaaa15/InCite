@@ -34,6 +34,13 @@ provider call. Prompts use fresh evidence and up to three earlier user messages
 for request context. The authorized transcript still includes assistant replies.
 See [ADR 001](decisions/001-postgresql-document-eligibility.md).
 
+## Deletion lifecycle
+
+PostgreSQL stores deletion intent separately from document ingestion status.
+Active views and retrieval exclude pending documents and collections. The API
+acknowledges the recorded request and retains history. Physical cleanup and
+restart recovery are pending. See [ADR 002](decisions/002-reliable-deletion-lifecycle.md).
+
 ## External services
 - **LLM API** (Groq via ChatGroq): called by chat_service and comparison_service to generate answers
   from retrieved chunks (migrated from Google Gemini to avoid free-tier request quota limits).

@@ -9,7 +9,7 @@ from app.core.deps import get_current_user
 from app.models.user import User
 from app.repositories import document_repository
 from app.schemas.document import DocumentResponse
-from app.services import collection_service, ingestion_service
+from app.services import collection_service, deletion_service, ingestion_service
 from app.services.collection_service import CollectionNotFoundError
 from app.services.storage_service import storage_service
 from app.utils.pdf_validator import validate_pdf_file, validate_upload
@@ -89,6 +89,18 @@ def upload_document(
     # background ingestion task.  Returns immediately with                #
     # status=processing; the frontend polls GET /documents/{id}.         #
     # ------------------------------------------------------------------ #
+    # The file was validated outside the lock. Recheck admission before the
+    # document insert so it cannot commit after the parent is marked deleted.
+    try:
+        collection_service.lock_owned_active_collection(db, current_user.id, collection_id)
+    except CollectionNotFoundError:
+        db.rollback()
+        try:
+            storage_service.delete_file(file_path)
+        except OSError:
+            logger.exception("Could not remove unregistered upload | collection=%s", collection_id)
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Collection not found")
+
     document = document_repository.create(
         db, collection_id=collection_id, filename=file.filename, file_path=file_path
     )
@@ -134,21 +146,15 @@ def get_document(
     return _get_owned_document(db, current_user.id, document_id)
 
 
-@router.delete("/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/documents/{document_id}", status_code=status.HTTP_202_ACCEPTED)
 def delete_document(
     document_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    document = _get_owned_document(db, current_user.id, document_id)
-    collection_id = document.collection_id   # capture before cascade deletes the row
-    storage_service.delete_file(document.file_path)
-    document_repository.delete(db, document)  # cascades to chunks in Postgres
-    # Note: this does not remove the corresponding vectors from Chroma —
-    # a known gap, tracked in design-decisions.md as a Phase 2 cleanup item.
-
-    # Invalidate BM25 cache so the deleted document's chunks are no longer
-    # returned by hybrid retrieval on the next query in this collection.
-    from app.core import bm25_store
-    bm25_store.invalidate(str(collection_id))
+    try:
+        deletion_service.request_deletion(db, current_user.id, document_id=document_id)
+    except deletion_service.DeletionTargetNotFound:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    return {"status": "cleanup_pending"}
 

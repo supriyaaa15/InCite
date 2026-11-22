@@ -13,14 +13,21 @@
 - `POST /collections` — {name} -> Collection
 - `GET /collections` — list current user's collections
 - `GET /collections/{id}` — get one
-- `DELETE /collections/{id}`
+- `DELETE /collections/{id}` — record logical deletion and return `202 Accepted`
+  with `{"status":"cleanup_pending"}`. The collection becomes unavailable to
+  new uploads and chat. Owner-only history endpoints still serve its existing chats.
 
 ## Documents
 - `POST /collections/{id}/documents` — multipart upload, kicks off background
   ingestion (chunk + embed + store), returns Document with status=processing
 - `GET /collections/{id}/documents` — list docs in a collection
 - `GET /documents/{id}` — single doc, for the frontend to poll status
-- `DELETE /documents/{id}`
+- `DELETE /documents/{id}` — record logical deletion and return `202 Accepted`
+  with `{"status":"cleanup_pending"}`. The document disappears from active views
+  and retrieval. The PDF, SQL chunks, and vectors remain pending cleanup.
+
+Repeating an authorized deletion request returns the same pending status and
+preserves the original request time. Missing and foreign IDs return `404`.
 
 ## Chat
 - `POST /collections/{id}/chat` — {message, session_id?} -> {answer, citations}

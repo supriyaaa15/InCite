@@ -5,11 +5,10 @@ Runs as a FastAPI BackgroundTask, so the HTTP response has already been sent
 by the time this executes.  Uses its own DB session (SessionLocal) because
 the request-scoped session from get_db() is already closed.
 
-Failure guarantee
------------------
-Every execution path ends with the document status set to either
-`ready` or `failed`.  A `failed` document always carries an `error_code`
-and a user-safe `error_message` on the DB row.
+Processing lifecycle
+--------------------
+An active document can finish as `ready` or `failed`. A recorded deletion
+request cancels further SQL writes and leaves existing artifacts for cleanup.
 
 Exception hierarchy caught (in order):
 1. UploadValidationError — raised by secondary checks inside iter_pages,
@@ -26,10 +25,8 @@ Note on OOMKilled / SIGKILL:
 
 Cleanup on failure
 ------------------
-If any chunks have already been written to Chroma or Postgres, they are
-deleted before marking the document as failed.  This prevents accumulation
-of partial embeddings that would corrupt retrieval results.  Cleanup errors
-are logged but never re-raised — the document is always marked failed.
+After marking an active document failed, best-effort cleanup removes any
+partial Chroma and SQL chunks. Errors are logged.
 
 Logging
 -------
@@ -54,6 +51,16 @@ from app.utils.upload_errors import UploadErrorCode, UploadValidationError
 logger = logging.getLogger(__name__)
 
 BATCH_SIZE = 32
+
+
+class IngestionCancelled(Exception):
+    """The document or collection stopped accepting ingestion writes."""
+
+
+def _require_processing(db, document_id):
+    document = document_repository.get_by_id(db, document_id)
+    if document is None or document.status != DocumentStatus.processing:
+        raise IngestionCancelled()
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +94,7 @@ def _flush_batch(db, document, batch: list[dict], batch_number: int, embedder, s
     ]
 
     t0 = time.perf_counter()
+    _require_processing(db, document.id)
     store.upsert(
         ids=batch_ids,
         embeddings=embeddings,
@@ -108,6 +116,8 @@ def _flush_batch(db, document, batch: list[dict], batch_number: int, embedder, s
     ]
 
     t0 = time.perf_counter()
+    if document_repository.lock_processing(db, document.id, document.collection_id) is None:
+        raise IngestionCancelled()
     chunk_repository.bulk_create(db, batch_rows)
     postgres_insert_time = time.perf_counter() - t0
 
@@ -170,16 +180,13 @@ def _mark_failed(
     elapsed: float,
 ) -> None:
     """
-    Central failure handler: cleans up partial data, then writes the failed
-    status + error info to the document row.
+    Persist failure for active processing rows before cleaning partial data.
     """
     if document is None:
         return  # deleted before ingestion ran — nothing to do
 
-    _cleanup_partial_data(db, document, store)
-
     try:
-        document_repository.update_status(
+        marked_failed = document_repository.finish_processing(
             db,
             document,
             DocumentStatus.failed,
@@ -187,10 +194,14 @@ def _mark_failed(
             error_message=user_message,
         )
     except Exception:
+        db.rollback()
         logger.exception(
             "Failed to persist failed status | document_id=%s",
             document.id,
         )
+        return
+    if marked_failed:
+        _cleanup_partial_data(db, document, store)
 
 
 # ---------------------------------------------------------------------------
@@ -214,11 +225,12 @@ def ingest_document(document_id: str) -> None:
     db = SessionLocal()
     document: Document | None = None
     store = None
+    page_iter = None
     total_start = time.perf_counter()
 
     try:
         document = document_repository.get_by_id(db, uuid.UUID(document_id))
-        if document is None:
+        if document is None or document.status != DocumentStatus.processing:
             logger.warning(
                 "Ingestion aborted: document not found (deleted?) | document_id=%s",
                 document_id,
@@ -275,6 +287,7 @@ def ingest_document(document_id: str) -> None:
                         print("Getting embedder...")
                         embedder = get_embedder()
                         print("Embedder loaded")
+                        _require_processing(db, document.id)
                         store = get_collection_store(str(document.collection_id))
 
                     batch_number += 1
@@ -317,6 +330,7 @@ def ingest_document(document_id: str) -> None:
                 print("Getting embedder...")
                 embedder = get_embedder()
                 print("Embedder loaded")
+                _require_processing(db, document.id)
                 store = get_collection_store(str(document.collection_id))
 
             batch_number += 1
@@ -335,9 +349,10 @@ def ingest_document(document_id: str) -> None:
         # Success
         # ------------------------------------------------------------------
         stage_start = time.perf_counter()
-        document_repository.update_status(
+        if not document_repository.finish_processing(
             db, document, DocumentStatus.ready, page_count=page_count
-        )
+        ):
+            raise IngestionCancelled()
         print("6. Status updated")
         status_update_time = time.perf_counter() - stage_start
         total_time = time.perf_counter() - total_start
@@ -363,6 +378,10 @@ def ingest_document(document_id: str) -> None:
     # ------------------------------------------------------------------
     # Structured failure handling
     # ------------------------------------------------------------------
+    except IngestionCancelled:
+        db.rollback()
+        logger.info("Ingestion stopped | document_id=%s", document_id)
+
     except UploadValidationError as exc:
         elapsed = time.perf_counter() - total_start
         logger.warning(
@@ -436,4 +455,8 @@ def ingest_document(document_id: str) -> None:
             bm25_store.invalidate(str(document.collection_id))
 
     finally:
-        db.close()
+        try:
+            if page_iter is not None:
+                page_iter.close()
+        finally:
+            db.close()

@@ -32,6 +32,8 @@ def list_collections(db: Session, user_id: uuid.UUID) -> list[Collection]:
     return collection_repository.list_by_user(db, user_id)
 
 
-def delete_collection(db: Session, user_id: uuid.UUID, collection_id: uuid.UUID) -> None:
-    collection = get_owned_collection(db, user_id, collection_id)
-    collection_repository.delete(db, collection)
+def lock_owned_active_collection(db: Session, user_id: uuid.UUID, collection_id: uuid.UUID) -> Collection:
+    collection = collection_repository.lock_by_id(db, collection_id, user_id=user_id)
+    if collection is None or collection.delete_requested_at is not None:
+        raise CollectionNotFoundError()
+    return collection
