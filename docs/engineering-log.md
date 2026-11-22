@@ -121,5 +121,36 @@ errors before and after external operations, and a failed PostgreSQL
 finalization. They exercised a Chroma write finishing after DELETE was
 accepted, followed by cleanup, and recovery during a fresh FastAPI
 lifespan. A separate Windows subprocess test verified OS lock release on
-abrupt process exit. Killing and restarting the full application during
-cleanup and exercising the POSIX lock path remain deployment checks.
+abrupt process exit. Full application restart and POSIX lock verification
+were still open at that point.
+
+## Cleanup scheduling and deployment verification
+
+A busy collection reproduced starvation by occupying all 16 document slots
+on repeated passes. The worker now defers busy targets for four seconds
+using the existing retry timestamp. It keeps their failure count and last
+error. The regression runs the actual worker with PostgreSQL, Chroma, and
+temporary PDFs. The seventeenth document finishes while the original 16
+remain locked. After release and expiry, the worker cleans all 16.
+Against an isolated copy of `a19fdb3`, the same test failed at the expected
+assertion because the seventeenth document was still pending on the next pass.
+
+The PowerShell commands above passed **83 unit tests** and **33 integration
+tests**, with zero failures, errors, or skips. Pytest reported two unit and
+six integration dependency deprecation warnings. The disposable stack used
+PostgreSQL 16.14 and Chroma 0.5.15.
+
+The existing cross-process lock test passed in a Linux Docker container.
+The previous Linux check also verified release after `SIGKILL`. The previous
+Windows Uvicorn crash test terminated the app after vector and PDF removal
+and before SQL finalization. Restart completed cleanup against the same
+disposable stores and preserved neighboring artifacts. Graceful shutdown
+waited for its active pass. Full Linux application crash recovery and a
+kill during a Chroma operation remain unverified.
+
+The image command pins one worker even with `WEB_CONCURRENCY=4`. A BuildKit
+probe copied a synthetic context and confirmed 25 private or generated paths
+were excluded and 11 intended paths were retained. The full backend image
+dependency build was outside this check. The deployment guide now places
+backup and migration confirmation before startup, followed by readiness and
+cleanup verification. No existing database was migrated.

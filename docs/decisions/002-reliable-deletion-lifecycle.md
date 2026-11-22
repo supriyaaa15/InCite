@@ -73,8 +73,13 @@ The last SQL transaction sets the completion time and keeps the archive and
 history rows. Retrieval uses non-creating Chroma lookups.
 
 The worker records the failed step and backs off from five seconds up to five
-minutes. Each pass selects a bounded batch. Busy artifact locks are skipped
-until another pass. A crash or failed SQL commit leaves durable pending work.
+minutes. Each pass selects a bounded batch. Previously, 16 pending documents
+in a busy collection could fill every slot on every poll and starve an
+unrelated document. A busy lock now moves its target's existing
+`cleanup_retry_at` four seconds ahead, without changing the failure count or
+last error. The normal due-time filter excludes it during that window. Due work
+keeps its existing timestamp ordering. A crash or failed SQL commit leaves
+durable pending work.
 The next attempt repeats the external steps and treats verified absence as
 success. There is no public endpoint to run cleanup against arbitrary targets.
 If PostgreSQL is unavailable, a later poll retries discovery.
@@ -84,6 +89,9 @@ If PostgreSQL is unavailable, a later poll retries discovery.
 Synchronous deletion cannot atomically commit changes across PostgreSQL,
 Chroma, and the filesystem. A separate queue could track claims and retries,
 but the existing rows can hold the pending request and retry state.
+Larger batches only raise the contention threshold. Blocking on the artifact
+lock would stall the pass. Reusing the existing timestamp keeps the batch
+bounded and makes the deferral visible across restarts.
 
 An in-flight Chroma operation may finish after logical deletion, but cleanup
 waits for its artifact lock and later batches recheck pending state under that
@@ -93,10 +101,15 @@ embedded Chroma internals, separate hosts, independent volumes, or tools that
 bypass the lock. Run one application process per embedded Chroma store.
 [Chroma system constraints](https://cookbook.chromadb.dev/core/system_constraints/).
 
-Before rollout, stop older application processes, apply Alembic revision
-`d4e5f6a7b8c9`, and start the upgraded process. Older ingestion code does not
-take the artifact lock. Set `DELETION_CLEANUP_ENABLED=false` to pause physical
-cleanup while retaining ordinary logical deletion requests.
+Before rollout, stop older application processes, back up PostgreSQL, Chroma
+and uploads, then apply `alembic upgrade head` to the intended database.
+Confirm the database revision matches the head before starting the upgraded
+process. Verify readiness and that due cleanup resumes. The Docker command
+explicitly sets `--workers 1`, which overrides `WEB_CONCURRENCY`. Supply runtime
+configuration at deployment time. The Docker build context excludes local
+configuration and runtime artifacts. See the [deployment steps](../../README.md#deployment-and-upgrades).
+Set `DELETION_CLEANUP_ENABLED=false` to pause physical cleanup while retaining
+ordinary logical deletion requests.
 
 A crash between upload file write and SQL registration can leave an
 unregistered file. Collection cleanup preserves it and reports the nonempty
@@ -107,4 +120,10 @@ erasure, and redaction of retained transcripts are outside this milestone.
 ## Verification
 
 See the [engineering log](../engineering-log.md) for the unit, migration, and
-disposable PostgreSQL and Chroma test results.
+disposable PostgreSQL and Chroma test results. The 17-document regression
+exercises the real worker and verifies both progress for the unlocked
+collection and recovery of deferred work. A Linux container verified POSIX
+lock contention and release after `SIGKILL`. A separate Windows Uvicorn process
+test verified recovery after both external artifacts were removed but before
+SQL finalization, with neighboring artifacts intact. A full Linux application
+crash and restart and a kill during a Chroma operation remain unverified.

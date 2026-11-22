@@ -123,9 +123,20 @@ def _record_failure(collection_id, document_id, step, error):
         target.cleanup_error = f"{step}: {type(error).__name__}"
 
 
+def _defer_busy_target(collection_id, document_id):
+    now = _now()
+    with SessionLocal.begin() as db:
+        pending = _pending_target(db, collection_id, document_id, now, for_update=True)
+        if pending is not None:
+            _, target = pending
+            # Leave room for a poll to pick other work while this lock is busy.
+            target.cleanup_retry_at = now + timedelta(seconds=2 * POLL_SECONDS)
+
+
 def _cleanup_target(collection_id, document_id):
     with collection_artifact_lock(collection_id, wait=False) as acquired:
         if not acquired:
+            _defer_busy_target(collection_id, document_id)
             return
         step = "postgres"
         try:

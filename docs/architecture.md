@@ -54,6 +54,16 @@ Single Render web service runs the FastAPI app, with Chroma embedded inside it (
 
 - Backend + Postgres: Render
 - Frontend: Vercel
+- Run one FastAPI process and one replica per embedded Chroma store. The
+  backend image explicitly passes `--workers 1`, including when
+  `WEB_CONCURRENCY` is present. Keep that setting when overriding the command.
+- Stop old writers and back up PostgreSQL, Chroma, and uploads before running
+  `alembic upgrade head` against the intended database. Confirm the revision
+  before starting the new process. Then check app, PostgreSQL, and Chroma
+  readiness and pending cleanup. See the [deployment steps](../README.md#deployment-and-upgrades).
+- The Docker build excludes local configuration and runtime artifacts. Supply
+  credentials at runtime and keep backups and custom storage outside the build
+  context.
 - Chosen over AWS EC2 for setup speed within a 30-day timeline — see
   design-decisions.md for the full reasoning.
   Known trade-off: Chroma's embedded data isn't guaranteed to survive a redeploy unless the persist path is backed by a persistent disk. Accepted for this project — documents can be re-uploaded after a redeploy; not acceptable for a real production system with real users.

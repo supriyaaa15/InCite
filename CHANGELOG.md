@@ -11,6 +11,8 @@
 
 - A FastAPI worker removes pending document vectors and PDFs, then deletes their PostgreSQL rows and chunks. Archived collections keep their chat history. The worker resumes pending requests at startup and records bounded retries in PostgreSQL.
 - Uploads, ingestion, and cleanup share a per-collection OS lock on the configured local Chroma volume. Cleanup preserves unsafe or untracked files for review.
+- Busy collection locks briefly defer pending cleanup without incrementing the failure count, so unrelated documents can progress.
+- The backend image explicitly runs one Uvicorn worker and excludes local configuration and runtime artifacts from its build context. The deployment guide now places backups and migration verification before application startup.
 
 ### Changed
 

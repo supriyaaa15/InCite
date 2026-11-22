@@ -48,6 +48,7 @@ if not (
 
 from app.core import bm25_store
 from app.core.chroma_client import get_collection_store, get_existing_collection_store
+from app.core.collection_artifacts import collection_artifact_lock
 from app.api import document_routes
 from app.core.config import settings
 from app.core.database import SessionLocal, engine
@@ -241,6 +242,60 @@ def _assert_cleaned(corpus, document_id, chunk_id, pdf):
         assert db.scalar(select(Chunk.id).where(Chunk.document_id == document_id)) is None
     assert not corpus.store.get(ids=[chunk_id])["ids"]
     assert not pdf.exists()
+
+
+def test_busy_collection_does_not_starve_later_document(corpus, monkeypatch):
+    blocked = []
+    for index in range(16):
+        key = f"busy-{index}"
+        corpus.chunks[key] = corpus.seed(key, DocumentStatus.ready)
+        target = _cleanup_fixture(corpus, key)
+        deletion_service.request_deletion(corpus.db, corpus.owner_id, document_id=target[0])
+        blocked.append(target)
+
+    later_id = uuid4()
+    later_chunk = f"{later_id}_p1_c0"
+    later_pdf = scratch / "uploads" / str(corpus.owner_id) / str(corpus.second_owned_id) / f"{later_id}.pdf"
+    later_pdf.parent.mkdir(parents=True)
+    later_pdf.write_bytes(b"synthetic PDF")
+    later_store = get_collection_store(str(corpus.second_owned_id))
+    later_store.upsert(ids=[later_chunk], embeddings=[[1.0, 0.0]],
+                       metadatas=[{"document_id": str(later_id)}], documents=["Synthetic later document"])
+    corpus.db.add(Document(id=later_id, collection_id=corpus.second_owned_id, filename="later.pdf",
+                           file_path=str(later_pdf), status=DocumentStatus.ready))
+    corpus.db.flush()
+    corpus.db.add(Chunk(document_id=later_id, page_number=1, chunk_index=0,
+                        content="Synthetic later document", chroma_id=later_chunk))
+    corpus.db.commit()
+    deletion_service.request_deletion(corpus.db, corpus.owner_id, document_id=later_id)
+
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(deletion_cleanup, "_now", lambda: now)
+    with collection_artifact_lock(corpus.collection_id):
+        deletion_cleanup.run_cleanup_pass()
+        with SessionLocal() as db:
+            assert db.get(Document, later_id) is not None
+        now += timedelta(seconds=deletion_cleanup.POLL_SECONDS)
+        deletion_cleanup.run_cleanup_pass()
+        with SessionLocal() as db:
+            assert db.get(Document, later_id) is None
+            assert db.scalar(select(Chunk.id).where(Chunk.document_id == later_id)) is None
+            for document_id, chunk_id, pdf in blocked:
+                document = db.get(Document, document_id)
+                assert document.cleanup_retry_at > now
+                assert document.cleanup_attempts == 0 and document.cleanup_error is None
+                assert pdf.exists()
+                assert corpus.store.get(ids=[chunk_id])["ids"] == [chunk_id]
+        assert not later_pdf.exists()
+        assert not later_store.get(ids=[later_chunk])["ids"]
+
+    deletion_cleanup.run_cleanup_pass()
+    with SessionLocal() as db:
+        assert all(db.get(Document, document_id) is not None for document_id, _, _ in blocked)
+    now += timedelta(seconds=deletion_cleanup.POLL_SECONDS)
+    deletion_cleanup.run_cleanup_pass()
+    for target in blocked:
+        _assert_cleaned(corpus, *target)
 
 
 def test_cleanup_is_scoped_and_evicts_bm25(corpus):
@@ -524,6 +579,8 @@ def test_in_flight_chroma_batch_cannot_register_sql_chunks_after_delete(corpus, 
     corpus.db.get(Document, document_id).file_path = str(pdf)
     corpus.db.commit()
     calls = []
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(deletion_cleanup, "_now", lambda: now)
 
     def upsert(**kwargs):
         calls.extend(kwargs["ids"])
@@ -550,6 +607,7 @@ def test_in_flight_chroma_batch_cannot_register_sql_chunks_after_delete(corpus, 
         document = fresh.get(Document, document_id)
         assert document.delete_requested_at is not None and document.status == DocumentStatus.processing
         assert fresh.scalar(select(Chunk.id).where(Chunk.document_id == document_id)) is None
+        now = document.cleanup_retry_at
     deletion_cleanup._cleanup_target(corpus.collection_id, document_id)
     _assert_cleaned(corpus, document_id, chunk_id, pdf)
     calls_before = calls.copy()

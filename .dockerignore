@@ -1,0 +1,40 @@
+# Local configuration and credentials
+**/.env
+**/.env.*
+**/*.env
+!**/.env.example
+**/.aws
+**/.ssh
+**/.codex
+**/.agents
+
+# Repository metadata
+**/.git
+
+# Local Python and frontend build artifacts
+**/.venv
+**/venv
+**/__pycache__
+**/*.py[cod]
+**/*.egg-info
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/.coverage*
+**/htmlcov
+**/node_modules
+frontend/dist
+
+# Persistent application state, backups, and test output
+**/uploads
+**/chroma_data
+**/chroma.sqlite3*
+**/.incite-artifact-locks
+**/postgres_data
+**/backups
+**/*.dump
+**/*.log
+**/test-results
+**/pytest-of-*
+**/tmp
+**/temp
