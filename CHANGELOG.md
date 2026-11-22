@@ -22,6 +22,7 @@
 
 ### Removed
 
+- Removed the unused `langchain`, `langchain-community`, `langchain-google-genai`, and `google-genai` Python dependencies. The Chroma and Groq adapters remain in use.
 - Retired the original standalone Gemini and remote-Chroma RAG smoke script. The Phase 1A suite exercises the current application paths with disposable stores and fake model responses.
 
 ### Tests

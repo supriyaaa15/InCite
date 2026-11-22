@@ -154,3 +154,36 @@ were excluded and 11 intended paths were retained. The full backend image
 dependency build was outside this check. The deployment guide now places
 backup and migration confirmation before startup, followed by readiness and
 cleanup verification. No existing database was migrated.
+
+## Unused AI dependency cleanup
+
+Removed four unused requirements: `langchain`, `langchain-community`,
+`langchain-google-genai`, and `google-genai`. No active import used those
+packages. The installed Community package depended on the LangChain
+metapackage, and neither is required by the Chroma or Groq adapter.
+The existing adapter pins and their shared transitive `langchain-core`
+remain in place. The runtime declaration count fell from 24 to 20.
+The Python requirements have no lockfile to regenerate. See
+[ADR 003](decisions/003-remove-unused-ai-dependencies.md).
+
+A fresh Windows Python 3.11.18 environment resolved and installed 135
+runtime distributions from those 20 declarations, excluding the virtual
+environment's bootstrap tools and the separate pytest install. The four
+removed packages were absent. The install retained `langchain-chroma`
+0.1.4 and `langchain-groq` 0.3.2 and resolved `langchain-core` 0.3.86
+and `groq` 0.37.1. Both `pip check` runs passed, before and after
+installing pytest 8.3.5. The uncached Windows install took about 29 minutes
+on this machine. No comparable baseline install was timed.
+
+Offline smoke checks exercised the Chroma vector adapter and plain and
+structured Groq adapter calls with fake inputs and an in-memory HTTP
+transport. All eight utility modules present in the checkout imported,
+including the local benchmark tools. The chunk benchmark's `--help` ran
+successfully. Dataset workflows and live model calls were outside this
+verification.
+
+The two project runner commands above passed **83 unit tests** and
+**33 integration tests** in the clean environment, with zero failures,
+errors, or skips. Pytest reported two unit and six integration dependency
+deprecation warnings. The integration runner used PostgreSQL 16.14 and
+Chroma 0.5.15 in disposable storage and removed its container.
