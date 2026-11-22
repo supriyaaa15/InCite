@@ -1,5 +1,44 @@
 # Design decisions log
 
+> **Historical design journal.** These entries record the tradeoffs, incidents,
+> and experiments at the time. Use the [architecture guide](architecture.md)
+> for the current system and the [engineering log](engineering-log.md) for
+> milestone verification.
+
+## Current decisions
+
+- [ADR 001 — PostgreSQL eligibility and chat history](decisions/001-postgresql-document-eligibility.md).
+  PostgreSQL verifies ready documents in the authorized collection, excludes
+  pending deletions, and supplies citation filenames. Prompts use fresh
+  evidence and recent user messages. Earlier assistant replies remain in the
+  stored transcript.
+- [ADR 002 — Deletion and recovery](decisions/002-reliable-deletion-lifecycle.md).
+  PostgreSQL records deletion intent before active views and retrieval exclude
+  the target. A worker retries cleanup after failures or restarts. The supported
+  deployment uses one application process per embedded Chroma store.
+- [ADR 003 — Dependency cleanup](decisions/003-remove-unused-ai-dependencies.md),
+  [ADR 005 — Native Groq](decisions/005-native-groq-provider.md), and
+  [ADR 006 — LangChain Core removal](decisions/006-remove-langchain-core.md).
+  The earlier Gemini-to-Groq migration used ChatGroq. The current provider calls
+  the Groq SDK directly, and retrieval uses the local `RetrievedChunk` type and a
+  cached SentenceTransformer.
+- [ADR 004 — Native Chroma retrieval](decisions/004-native-chroma-vector-retrieval.md).
+  Vector is the configured default. Optional hybrid modes fuse independent
+  vector and BM25 pools, fetch eligible BM25-only hits, and can apply CrossEncoder
+  reranking. See the [current retrieval flow](architecture.md#ingestion-and-retrieval).
+
+## Selected historical entries
+
+- [Separate PostgreSQL and Chroma stores](#day-1-2-postgres--chroma-not-postgres--pgvector)
+- [Debugging dependency and protocol conflicts](#day-14-15-dependency-resolution-saga-three-real-conflicts-in-order)
+- [The first attempt at chat history](#day-24-bug-fix-chat-wasnt-history-aware-answered-off-topic-on-follow-ups)
+- [The original SQLAlchemy deletion bug](#day-25-bug-deleting-a-collection-crashed-with-a-not-null-constraint-violation)
+- [The move to embedded Chroma](#day-26-deployment-architecture-embedded-chroma-persistentclient-not-a-separate-service)
+- [The original hybrid fusion tradeoff](#decision-3--single-pass-candidate-fetching--dictionary-rrf-fusion-zero-second-chroma-request)
+
+---
+
+
 
 
 Entries added as decisions are made, not reconstructed later.
@@ -1584,7 +1623,7 @@ Decision: three more requested features (upload size/count limits, malformed-PDF
 
 
 
-## ## [Day 31] Deployment migration: Render → Railway, PDF ingestion optimization, and parser replacement
+## [Day 31] Deployment migration: Render → Railway, PDF ingestion optimization, and parser replacement
 
 
 
