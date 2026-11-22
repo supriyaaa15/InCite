@@ -1,5 +1,10 @@
 # ADR 003 — Remove unused AI framework dependencies
 
+**Status** — Implemented. The retained adapters described in this historical
+decision were later replaced in [ADR 004](004-native-chroma-vector-retrieval.md)
+and [ADR 005](005-native-groq-provider.md). [ADR 006](006-remove-langchain-core.md)
+removed the remaining Core dependency.
+
 ## Context
 
 InCite owns ingestion, retrieval ranking, PostgreSQL eligibility, prompts,

@@ -1,5 +1,9 @@
 # ADR 005 — Use the native Groq SDK for generation
 
+**Status** — Implemented. The native Groq provider remains in use.
+[ADR 006](006-remove-langchain-core.md) superseded the remaining Core
+dependencies described in this record.
+
 ## Context
 
 ChatGroq wrapped the Groq SDK, serialized prompt strings, built named tool

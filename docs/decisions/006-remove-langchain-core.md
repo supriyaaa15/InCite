@@ -1,5 +1,7 @@
 # ADR 006 — Remove LangChain Core
 
+**Status** — Implemented.
+
 ## Context
 
 Native Chroma handles vector search and the official Groq SDK handles

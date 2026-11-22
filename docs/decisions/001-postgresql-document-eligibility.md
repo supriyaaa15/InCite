@@ -1,6 +1,8 @@
 # ADR 001 — PostgreSQL document eligibility
 
-**Status** — Implemented for Phase 1A.
+**Status** — Implemented. [ADR 002](002-reliable-deletion-lifecycle.md)
+extends eligibility to deletion-pending documents and collections. The
+original cleanup proposal below predates that implementation.
 
 ## Context
 

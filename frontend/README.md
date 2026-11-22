@@ -1,34 +1,26 @@
 # InCite frontend
 
-React (Vite) frontend. Talks to the FastAPI backend at `http://localhost:8000`.
+The React and Vite app provides sign-in, registration, collections, PDF uploads and status polling, and collection chat with citations and session history. Chat can also display structured comparison and recommendation results.
 
-## Setup
+## Local setup
+
+Start the FastAPI backend using the [repository setup steps](../README.md#installation--startup). From the repository root:
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 
-Opens at `http://localhost:5173`. Make sure the backend (`docker compose up`)
-is running first — this frontend doesn't work standalone.
+Open [http://localhost:5173](http://localhost:5173). The client defaults to `http://localhost:8000` for the API. Set `VITE_API_BASE_URL` before starting Vite or building if your backend uses another origin. Include the frontend origin in the backend's `ALLOWED_ORIGINS`. Vite exposes `VITE_` values to browsers, so use this variable for the public API URL only.
 
-## Day 19 status
+Run `npm run build` to produce `dist/`. The checked-in Vercel rewrite serves the SPA entry point for client-side routes.
 
-Login/register page working against `/auth/register`, `/auth/login`,
-`/auth/me`. Token stored in localStorage, validated on load. Successful
-login/register redirects to a placeholder home screen (real Collections
-page comes Day 20).
+## Source layout
 
-## Structure
+- `src/api/client.js` defines API requests and attaches Bearer tokens.
+- `src/context/AuthContext.jsx` manages sign-in state and validates the saved token with `/auth/me`.
+- `src/App.jsx` defines public and protected routes.
+- `src/pages/` and `src/components/` contain page views and the shared layout.
 
-```
-src/
-├── api/client.js        All HTTP calls go through here — one place for
-│                         base URL, auth headers, error handling.
-├── context/AuthContext.jsx   Token + user state, available anywhere via useAuth().
-├── pages/                Each route's top-level screen.
-├── components/           Shared UI pieces (empty until Day 20+).
-├── App.jsx                Routing + ProtectedRoute guard.
-└── index.css              Design tokens + global styles.
-```
+See the [HTTP API reference](../docs/api.md) for the backend contract.
