@@ -29,7 +29,7 @@ import logging
 from pydantic import BaseModel, Field
 
 from app.core.config import settings
-from app.core.llm import get_llm
+from app.core.llm import get_llm, is_quota_error
 from app.schemas.chat import ComparisonSection, RecommendedDocument
 
 logger = logging.getLogger(__name__)
@@ -182,18 +182,7 @@ def _resolve_target_documents(
 
 
 def _llm_structured_call(prompt: str, schema: type):
-    """
-    Single structured-output LLM call with primary → fallback model chain.
-    Each model is attempted once; quota errors (429/RESOURCE_EXHAUSTED) move
-    on to the next model, any other exception propagates immediately.
-
-    Returns the parsed schema instance. Raises if all models fail OR if the
-    model returns None (which happens when LangChain/Gemini cannot parse the
-    response into the requested schema without raising an exception — a known
-    silent failure mode in langchain-google-genai that is distinct from a
-    real API error).
-    """
-    _QUOTA_MARKERS = ("429", "resource_exhausted", "quota")
+    """Advance to the next model on a quota error or a missing response tool."""
     models = [settings.LLM_MODEL] + [
         m.strip() for m in settings.LLM_FALLBACK_MODELS.split(",") if m.strip()
     ]
@@ -201,21 +190,11 @@ def _llm_structured_call(prompt: str, schema: type):
     for model_name in models:
         try:
             llm = get_llm(model_name)
-            raw = llm.with_structured_output(schema).invoke(prompt)
+            raw = llm.generate_structured(prompt, schema)
 
-            # with_structured_output() can return None when LangChain fails
-            # to parse the model's response into the schema without raising.
-            # This is a silent failure — it does not trigger the except block,
-            # so we must guard here explicitly before the caller dereferences
-            # the result.
             if raw is None:
-                print(f"[comparison_service] _llm_structured_call: model={model_name} "
-                      f"schema={schema.__name__} returned None (parse failure)")
-                logger.error(
-                    "_llm_structured_call: %s returned None for schema %s — "
-                    "LangChain could not parse the model response into the schema. "
-                    "This is a known silent failure in langchain-google-genai. "
-                    "Treating as a parse error and trying the next model.",
+                logger.warning(
+                    "Model %s returned no response tool for %s. Trying the next model.",
                     model_name, schema.__name__
                 )
                 last_exc = ValueError(
@@ -228,7 +207,7 @@ def _llm_structured_call(prompt: str, schema: type):
 
         except Exception as e:
             last_exc = e
-            if any(marker in str(e).lower() for marker in _QUOTA_MARKERS):
+            if is_quota_error(e):
                 logger.warning("Model %s hit quota — trying next model", model_name)
                 continue
             raise  # non-quota errors propagate immediately

@@ -13,7 +13,7 @@ InCite is a multi-user PDF RAG (Retrieval-Augmented Generation) application wher
 - **Lexical BM25 Retrieval**: In-memory Okapi BM25 keyword search (`rank-bm25`) scoped per collection to capture exact terms, codes, and technical names.
 - **Hybrid Retrieval (RRF)**: Fusion of vector and BM25 candidate pools using Reciprocal Rank Fusion ($k=60$) to optimize retrieval quality across semantic and keyword queries.
 - **Configurable Retrieval Modes**: Vector search is the configured default. Hybrid BM25 + vector search and hybrid with CrossEncoder reranking are optional.
-- **Grounded Answer Generation**: Multi-model LLM integration via `ChatGroq` (`langchain-groq`) featuring automated fallback chains across backup models.
+- **Grounded answer generation** uses the official Groq Python SDK for QA, comparison, and recommendation, with fallback across configured models.
 - **Citations for QA**: Structured citations identify the source document filename, page number, and relevant text snippet.
 - **Confidence-Aware Filtering**: For QA, `MIN_CITATION_SCORE` filters weak evidence, and medium and high confidence thresholds classify the remaining evidence.
 - **Cross-Document Comparison**: Specialized service to run queries across distinct documents in a collection and synthesize comparative analysis.
@@ -55,7 +55,7 @@ flowchart TD
         Rerank --> TopK
     end
 
-    TopK --> LLM[LLM Generation: ChatGroq]
+    TopK --> LLM[LLM Generation: Groq SDK]
     LLM --> Response[Grounded Answer + Citations]
     Response --> Frontend
 ```
@@ -154,7 +154,7 @@ These historical evaluations used local labeled datasets. The Phase 1A test reru
 - **Backend**: FastAPI 0.115, Python 3.11, SQLAlchemy 2.0, Alembic 1.13, Pydantic 2.9, PyMuPDF 1.24
 - **Database**: PostgreSQL 16 in Docker Compose and the integration suite
 - **Vector Store & Retrieval**: Chroma 0.5 (`PersistentClient`), `rank-bm25` 0.2.2, `sentence-transformers` 3.2.0, LangChain 0.3
-- **LLM Integration**: Groq via `langchain-groq` 0.3.2 (`ChatGroq`)
+- **LLM integration** uses the official Groq Python SDK 0.37.1.
 - **Infrastructure**: Docker, Docker Compose
 
 ---

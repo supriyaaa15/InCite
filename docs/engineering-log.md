@@ -241,3 +241,48 @@ PostgreSQL 16.14 and Chroma 0.5.15 with deterministic embeddings. It exercised
 vector and hybrid retrieval, BM25-only hydration, optional reranking, SQL
 eligibility and rollback, deletion-pending exclusion, and citation contracts.
 The runner removed its PostgreSQL container after the suite.
+
+## Native Groq provider
+
+Replaced ChatGroq with a cached, synchronous provider over the official Groq
+SDK. The provider owns request serialization and Pydantic tool parsing.
+Chat and comparison services still own prompts, retry order, user-facing
+fallbacks, and model attribution. LangChain Core still supplies retrieval
+documents and the embedding interface. See
+[ADR 005](decisions/005-native-groq-provider.md).
+
+The audit matched 32 ordinary mock cases and four chat orchestration cases.
+The production regression tests compare exact request bodies against the
+legacy plain request and all three named tool schemas. They cover malformed
+JSON, missing arguments, and an invalid tool call preceding a valid one.
+Typed provider errors, HTTP status, and structured codes drive quota and
+timeout handling. Malformed JSON containing “quota” now takes the ordinary
+parse-error path. QA can try plain text on that model. Comparison and
+recommendation keep their existing parse-failure responses.
+
+The provider explicitly retains two SDK retries and `timeout=None`. The audit
+observed that omitting the timeout argument would use the Groq SDK defaults
+of five seconds for connect and sixty seconds for the other HTTP phases.
+Mock HTTP tests measure request order without waiting on real retry delays.
+QA can make six primary HTTP attempts for an exhausted 503 or read timeout
+before fallback. Comparison and recommendation stop after the SDK's three
+attempts for those errors.
+
+A clean Windows Python 3.11.18 install resolved 133 runtime distributions
+from 21 direct declarations, excluding bootstrap and pytest packages.
+The previous clean install resolved 134. Groq 0.37.1 is a direct dependency
+and `langchain-groq` is absent. The install retained LangChain Core 0.3.86,
+Chroma 0.5.15, NumPy 1.26.4, Torch 2.4.1+cpu, and Sentence Transformers 3.2.0.
+Pydantic resolved to 2.9.2 and HTTPX to 0.28.1. `pip check` passed with
+pytest 8.3.5 installed.
+
+The clean environment passed **123 unit-runner tests**, including **34**
+native provider cases, and **33 PostgreSQL/Chroma integration tests**.
+There were zero failures, errors, or skips. The unit runner reported two
+Pydantic class-based configuration deprecation warnings. Integration
+reported five warnings of that type and one Starlette warning about the
+deprecated AnyIO `BlockingPortal` alias. The runner used disposable
+PostgreSQL 16.14 and Chroma 0.5.15 and removed its container. Offline checks
+also verified client reuse, benchmark chunk IDs, and import of the local
+Phase 4 utility. Verification used mock HTTP or fake providers throughout.
+No live model behavior or latency comparison was measured.

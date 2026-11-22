@@ -137,14 +137,11 @@ def provider(monkeypatch):
     }
 
     class Provider:
-        def with_structured_output(self, schema):
-            def invoke(prompt):
-                prompts.append((schema.__name__, prompt))
-                return schema.model_validate(responses[schema.__name__])
+        def generate_structured(self, prompt, schema):
+            prompts.append((schema.__name__, prompt))
+            return schema.model_validate(responses[schema.__name__])
 
-            return SimpleNamespace(invoke=invoke)
-
-        def invoke(self, prompt):
+        def generate_text(self, prompt):
             pytest.fail("Unexpected plain-text provider call.")
 
     for service in (chat_service, comparison_service):
