@@ -16,15 +16,16 @@
 
 ### Changed
 
+- Retrieval uses validated `RetrievedChunk` values for vector hits and BM25 hydration. Queries call the cached MiniLM encoder directly.
 - Chat generation now uses the official Groq SDK. The provider preserves the existing named tools, prompt bodies, model order, and retry and timeout settings.
-- Vector retrieval now queries embedded Chroma directly with the existing MiniLM embeddings. It preserves result order, distances, chunk IDs, and the LangChain Core document shape used by ranking and citations.
+- Vector retrieval now queries embedded Chroma directly with the existing MiniLM embeddings. It preserves result order, distances, and chunk IDs.
 - Added independent vector and BM25 candidate pools, RRF over their union, and Chroma hydration for BM25-only hits. Hybrid retrieval and CrossEncoder reranking are optional. Vector search remains the configured default.
 - Switched chat generation from Gemini to Groq, with a configurable model fallback chain.
 - The chunk benchmark replaces the document-level benchmark and requires an explicit labeled JSON file via `--questions`.
 
 ### Removed
 
-- Removed the `langchain-groq` and `langchain-chroma` dependencies. LangChain Core remains in use for retrieval documents and embeddings.
+- Removed the `langchain-groq`, `langchain-chroma`, and `langchain-core` dependencies.
 - Removed the unused `langchain`, `langchain-community`, `langchain-google-genai`, and `google-genai` Python dependencies.
 - Retired the original standalone Gemini and remote-Chroma RAG smoke script. The Phase 1A suite exercises the current application paths with disposable stores and fake model responses.
 

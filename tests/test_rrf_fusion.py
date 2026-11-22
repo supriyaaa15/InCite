@@ -23,14 +23,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from langchain_core.documents import Document
+from app.core.retrieved_chunk import RetrievedChunk
 
 from app.services.retrieval_service import _rrf_fuse
 
 
-def _doc(text: str = "content", **meta) -> Document:
-    """Build a minimal LangChain Document for test vectors."""
-    return Document(page_content=text, metadata=meta)
+def _doc(text: str = "content", **meta) -> RetrievedChunk:
+    return RetrievedChunk(page_content=text, metadata=meta)
 
 
 def _make_vector_lookup(*chroma_ids: str) -> dict:
@@ -229,14 +228,14 @@ class TestT6BM25OnlyDocumentShape(unittest.TestCase):
 
     def test_document_constructed_from_chroma_get_has_required_keys(self):
         fetched = self._simulate_chroma_get_response("some_chroma_id")
-        doc = Document(page_content=fetched["documents"][0], metadata=fetched["metadatas"][0])
+        doc = RetrievedChunk(page_content=fetched["documents"][0], metadata=fetched["metadatas"][0])
 
         for required_key in ("document_id", "page_number", "chunk_index"):
             self.assertIn(required_key, doc.metadata)
 
     def test_document_page_content_matches_chunk_text(self):
         fetched = self._simulate_chroma_get_response("some_chroma_id")
-        doc = Document(
+        doc = RetrievedChunk(
             page_content=fetched["documents"][0],
             metadata=fetched["metadatas"][0],
         )
@@ -244,7 +243,7 @@ class TestT6BM25OnlyDocumentShape(unittest.TestCase):
 
     def test_document_name_carried_through_from_chroma_metadata(self):
         fetched = self._simulate_chroma_get_response("some_chroma_id")
-        doc = Document(
+        doc = RetrievedChunk(
             page_content=fetched["documents"][0],
             metadata=fetched["metadatas"][0],
         )

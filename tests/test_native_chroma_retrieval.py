@@ -1,15 +1,14 @@
 """Lock down the old vector adapter contract against disposable Chroma."""
 
-from types import SimpleNamespace
 from uuid import uuid4
 
 import chromadb
 from chromadb.api.models.Collection import Collection
-from langchain_core.documents import Document
 from pydantic import ValidationError
 import pytest
 
 from app.core import chroma_client
+from app.core.retrieved_chunk import RetrievedChunk
 from app.services import retrieval_service
 from scripts.benchmark_retrieval_chunk import _extract_chunk_id
 
@@ -21,10 +20,7 @@ QUERY_VECTOR = [1.0, 0.0]
 def chroma(monkeypatch, tmp_path):
     client = chromadb.PersistentClient(path=str(tmp_path / "chroma"))
     monkeypatch.setattr(chroma_client, "get_chroma_client", lambda: client)
-    monkeypatch.setattr(
-        retrieval_service, "get_langchain_embeddings",
-        lambda: SimpleNamespace(embed_query=lambda _: QUERY_VECTOR),
-    )
+    monkeypatch.setattr(retrieval_service, "embed_query", lambda _: QUERY_VECTOR)
     return client
 
 
@@ -59,9 +55,10 @@ def test_vector_query_preserves_order_distances_and_canonical_ids(chroma):
     assert [distance for _, distance in results] == raw["distances"][0] == [0.0, 0.0, 1.0]
     assert [doc.page_content for doc, _ in results] == raw["documents"][0]
     assert [doc.metadata for doc, _ in results] == raw["metadatas"][0]
-    assert all(isinstance(doc, Document) and doc.id is None for doc, _ in results)
+    assert all(isinstance(doc, RetrievedChunk) and doc.id is None for doc, _ in results)
     expected_ids = [canonical_ids[stored_ids.index(raw_id)] for raw_id in raw["ids"][0]]
     assert list(lookup) == [_extract_chunk_id(result) for result in results] == expected_ids
+    assert all(lookup[chunk_id][0] is chunk for chunk_id, (chunk, _) in zip(expected_ids, results))
 
 
 def test_missing_collection_is_not_created(chroma):

@@ -63,10 +63,9 @@ def _extract_chunk_id(item) -> str | None:
     """
     Extract a chunk ID from a retrieval result or citation.
 
-    InCite's retrieve() returns list[tuple[langchain_core.documents.Document, float]].
-    LangChain Documents do NOT have a top-level 'id' / 'chunk_id' field — the
-    chunk identity is split across three metadata keys: document_id, page_number,
-    chunk_index. The Chroma ID written by ingestion_service._flush_batch() is:
+    InCite's retrieve() returns list[tuple[RetrievedChunk, float]].
+    The canonical chunk identity comes from the document_id, page_number, and
+    chunk_index metadata. Ingestion writes it to Chroma in this format.
 
         f"{document_id}_p{page_number}_c{chunk_index}"
 
@@ -81,8 +80,7 @@ def _extract_chunk_id(item) -> str | None:
     if item is None:
         return None
 
-    # ── Path 1: LangChain Document (raw retrieve() output) ───────────────────
-    # item is a tuple[Document, float] — unwrap if needed.
+    # Path 1 uses the chunk from the (RetrievedChunk, float) retrieval pair.
     if isinstance(item, tuple):
         item = item[0]
 

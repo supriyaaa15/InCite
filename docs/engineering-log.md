@@ -286,3 +286,51 @@ PostgreSQL 16.14 and Chroma 0.5.15 and removed its container. Offline checks
 also verified client reuse, benchmark chunk IDs, and import of the local
 Phase 4 utility. Verification used mock HTTP or fake providers throughout.
 No live model behavior or latency comparison was measured.
+
+## Remove LangChain Core
+
+The retrieval service now constructs local Pydantic-backed
+`RetrievedChunk` values for vector hits and BM25-only hydration.
+The type validates text and metadata, copies the outer metadata dictionary,
+retains mutable fields and value equality, and defaults the optional ID to
+`None`. Numeric ID coercion remains available. The vector hit list and
+lookup use the same chunk object. The API continues to serialize citation
+dictionaries. See [ADR 006](decisions/006-remove-langchain-core.md).
+
+The direct query helper uses the cached SentenceTransformer and the same
+one-element input batch. An offline comparison against the embedding module
+exported from `774573a` used the same public MiniLM revision and cached
+CPU model instance. All four 384-dimensional query vectors matched bit for
+bit, including Unicode and whitespace inputs. The three-document batch
+also matched exactly. A disposable cosine collection returned identical
+order, canonical IDs, and raw distances. No GPU run or performance
+comparison was made.
+
+Before removing the requirement, the migrated code passed 131 unit-runner
+tests and 33 PostgreSQL/Chroma integration tests. Tests cover constructor
+validation, metadata copying and mutation, shared result identity, model
+caching, retrieval, SQL eligibility, citation scores, and benchmark IDs.
+The 34 native Groq mock-provider cases remain in the unit runner.
+
+The requirements installed successfully in a fresh Windows Python 3.11.18
+environment. The clean baseline had 21 direct and 133 total runtime
+packages. The new install has 20 direct and 122 total runtime packages,
+counted before installing pytest. No LangChain distribution was installed.
+Removing Core's `packaging` bound changed the resolved version from 25.0
+to 26.3. `pip check` reported no broken requirements with pytest 8.3.5
+installed. Chroma 0.5.15, Groq 0.37.1, SentenceTransformers 3.2.0, and
+CPU Torch 2.4.1 remained installed.
+
+The clean install passed all 131 unit tests and all 33 integration tests
+with zero failures or skips. The integration runner used disposable
+PostgreSQL 16.14 and temporary Chroma 0.5.15 storage, then removed the
+container. The unit run logged two Pydantic configuration deprecations.
+The integration run logged five of those and one Starlette/AnyIO
+`BlockingPortal` deprecation. Groq tests used mocked responses.
+
+The untracked Phase 4 utility remains unchanged. Its Core import on line 47
+and its type checks on lines 248 and 454 need a future local update to
+`app.core.retrieved_chunk.RetrievedChunk`. A clean-environment import check
+confirmed that the utility raises `ModuleNotFoundError` for `langchain_core`.
+The tracked benchmark imported and returned the same canonical ID from a
+retrieval result and a citation mapping.

@@ -153,7 +153,7 @@ These historical evaluations used local labeled datasets. The Phase 1A test reru
 - **Frontend**: React 18, Vite, React Router DOM, Lucide React, Vanilla CSS / TailwindCSS
 - **Backend**: FastAPI 0.115, Python 3.11, SQLAlchemy 2.0, Alembic 1.13, Pydantic 2.9, PyMuPDF 1.24
 - **Database**: PostgreSQL 16 in Docker Compose and the integration suite
-- **Vector Store & Retrieval**: Chroma 0.5 (`PersistentClient`), `rank-bm25` 0.2.2, `sentence-transformers` 3.2.0, LangChain 0.3
+- **Vector search and retrieval** use Chroma 0.5, `rank-bm25` 0.2.2, and `sentence-transformers` 3.2.0.
 - **LLM integration** uses the official Groq Python SDK 0.37.1.
 - **Infrastructure**: Docker, Docker Compose
 
