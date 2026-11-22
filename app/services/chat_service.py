@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.llm import get_llm
+from app.core.llm import get_llm, is_quota_error, is_transient_error
 from app.models.chat import ChatSession, MessageRole
 from app.models.document import DocumentStatus
 from app.repositories import chat_repository, document_repository, query_log_repository
@@ -32,6 +32,7 @@ class SessionCollectionMismatchError(Exception):
     pass
 
 
+# The schema docstring is part of the existing tool description sent to Groq.
 class AnswerWithReasoning(BaseModel):
     """
     Schema for structured LLM output.  Passed to with_structured_output()
@@ -67,24 +68,6 @@ class AnswerWithReasoning(BaseModel):
             "Return an empty list if no meaningful grounded questions can be generated."
         ),
     )
-
-
-# Substring matches against the exception's own message — deliberately
-# string-based rather than importing specific exception classes, since
-# the exact exception types vary across google-genai/langchain-google-genai
-# SDK versions and this project has already been bitten twice by assuming
-# a specific version's API shape. Matching on message content is more
-# resilient to that kind of drift.
-_QUOTA_ERROR_MARKERS = ("429", "resource_exhausted", "quota")
-_TRANSIENT_ERROR_MARKERS = ("503", "timeout", "timed out", "unavailable", "deadline exceeded")
-
-
-def _is_quota_error(exc: Exception) -> bool:
-    return any(marker in str(exc).lower() for marker in _QUOTA_ERROR_MARKERS)
-
-
-def _is_transient_error(exc: Exception) -> bool:
-    return any(marker in str(exc).lower() for marker in _TRANSIENT_ERROR_MARKERS)
 
 
 def get_owned_session(db: Session, user_id: uuid.UUID, session_id: uuid.UUID) -> ChatSession:
@@ -123,8 +106,9 @@ def _try_model(model_name: str, prompt: str) -> tuple[str, str, list[str]]:
     """
     llm = get_llm(model_name)
     try:
-        structured_llm = llm.with_structured_output(AnswerWithReasoning)
-        result = structured_llm.invoke(prompt)
+        result = llm.generate_structured(prompt, AnswerWithReasoning)
+        if result is None:
+            raise ValueError("model returned no response tool")
         answer = result.answer.strip()
         reasoning = result.reasoning.strip()
         if not answer:
@@ -132,10 +116,9 @@ def _try_model(model_name: str, prompt: str) -> tuple[str, str, list[str]]:
         follow_up_questions = _validate_followups(result.follow_up_questions)
         return answer, reasoning, follow_up_questions
     except Exception as structured_error:
-        if _is_quota_error(structured_error) or _is_transient_error(structured_error):
+        if is_quota_error(structured_error) or is_transient_error(structured_error):
             raise  # a real API problem — let the fallback chain handle it, don't mask it with a retry
-        response = llm.invoke(prompt)
-        content = response.content.strip()
+        content = llm.generate_text(prompt).strip()
         if not content:
             raise ValueError("model returned an empty response")
         return content, "", []  # no structured reasoning or follow-ups from a plain call
@@ -186,9 +169,9 @@ def _invoke_with_fallback(prompt: str) -> tuple[str | None, str | None, list[str
                 return answer, reasoning, follow_up_questions, model_name
             except Exception as e:
                 logger.warning(f"{model_name} failed: {e}")
-                if _is_quota_error(e):
+                if is_quota_error(e):
                     break  # this model is exhausted — no point retrying, try the next one
-                if _is_transient_error(e) and attempt == 0:
+                if is_transient_error(e) and attempt == 0:
                     time.sleep(1.5)
                     continue
                 break  # unrecognized error, or out of retries — try the next model anyway

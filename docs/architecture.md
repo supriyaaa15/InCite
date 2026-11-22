@@ -50,8 +50,7 @@ the embedded Chroma store and a per-collection OS lock on its local volume.
 See [ADR 002](decisions/002-reliable-deletion-lifecycle.md).
 
 ## External services
-- **LLM API** (Groq via ChatGroq): called by chat_service and comparison_service to generate answers
-  from retrieved chunks (migrated from Google Gemini to avoid free-tier request quota limits).
+- The LLM boundary in `app/core/llm.py` wraps the official Groq SDK in a cached, synchronous provider. It sends each prompt as one user message, requests plain text or a named function tool, and validates tool arguments with the existing Pydantic schemas. QA and comparison services own fallback order. See [ADR 005](decisions/005-native-groq-provider.md).
 
 ## Deployment
 Single Render web service runs the FastAPI app, with Chroma embedded inside it (PersistentClient) rather than as a separate service — avoids Render's requirement that any service receiving private network traffic be on a paid tier. See design-decisions.md for the full reasoning and alternatives considered (paid private Chroma service, Qdrant Cloud, AWS).
