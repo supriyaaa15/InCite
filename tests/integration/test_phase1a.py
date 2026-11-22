@@ -121,10 +121,7 @@ def offline_adapters(monkeypatch):
     monkeypatch.setattr(httpx.HTTPTransport, "handle_request", deny_http)
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", deny_http)
     monkeypatch.setattr(HTTPAdapter, "send", deny_http)
-    monkeypatch.setattr(
-        retrieval_service, "get_langchain_embeddings",
-        lambda: SimpleNamespace(embed_query=lambda query: [1.0, 0.0]),
-    )
+    monkeypatch.setattr(retrieval_service, "embed_query", lambda _: [1.0, 0.0])
 
 
 @pytest.fixture(autouse=True)

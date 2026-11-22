@@ -23,7 +23,7 @@ import uuid
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from langchain_core.documents import Document
+from app.core.retrieved_chunk import RetrievedChunk
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -32,8 +32,8 @@ from app.core.config import settings
 from app.services import retrieval_service
 
 
-def _make_doc(doc_id: str, text: str, page: int = 1, chunk: int = 0) -> Document:
-    return Document(
+def _make_doc(doc_id: str, text: str, page: int = 1, chunk: int = 0) -> RetrievedChunk:
+    return RetrievedChunk(
         page_content=text,
         metadata={
             "document_id": doc_id,

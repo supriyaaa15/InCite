@@ -4,12 +4,12 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from uuid import UUID, uuid4
 
-from langchain_core.documents import Document as RetrievedDocument
 from sqlalchemy import create_engine, delete
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.retrieved_chunk import RetrievedChunk
 from app.models import Base, ChatSession, Collection, Document, Message, User
 from app.models.chat import MessageRole
 from app.models.document import DocumentStatus
@@ -65,7 +65,7 @@ class TestDocumentEligibility(unittest.TestCase):
 
     @staticmethod
     def make_chunk(document_id, text):
-        return RetrievedDocument(page_content=text, metadata={
+        return RetrievedChunk(page_content=text, metadata={
             "document_id": str(document_id),
             "document_name": "untrusted.pdf",
             "page_number": 1,
@@ -88,10 +88,7 @@ class TestDocumentEligibility(unittest.TestCase):
         self.store = Mock()
         self.store.query.side_effect = query
         self.enterContext(patch.object(retrieval_service, "get_existing_collection_store", return_value=self.store))
-        self.enterContext(patch.object(
-            retrieval_service, "get_langchain_embeddings",
-            return_value=SimpleNamespace(embed_query=lambda _: [1.0, 0.0]),
-        ))
+        self.enterContext(patch.object(retrieval_service, "embed_query", return_value=[1.0, 0.0]))
         return self.store
 
     def bm25_candidates(self, *chunks, hydrated=None):
@@ -164,7 +161,7 @@ class TestDocumentEligibility(unittest.TestCase):
             self.assertEqual([d.page_content for d, _ in self.retrieve("hybrid")], ["ready"])
 
     def test_malformed_metadata_is_ignored(self):
-        self.vector_candidates(RetrievedDocument(page_content="malformed"), self.ready)
+        self.vector_candidates(RetrievedChunk(page_content="malformed"), self.ready)
         self.assertEqual([d.page_content for d, _ in self.retrieve()], ["ready"])
 
     def test_no_candidates_skips_eligibility_query(self):

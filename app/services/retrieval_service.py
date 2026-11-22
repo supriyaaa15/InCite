@@ -8,13 +8,13 @@ import uuid
 from typing import Optional
 
 from chromadb.errors import InvalidCollectionException
-from langchain_core.documents import Document
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.core.chroma_client import get_existing_collection_store
 from app.core.config import settings
-from app.core.embeddings import get_langchain_embeddings
+from app.core.embeddings import embed_query
+from app.core.retrieved_chunk import RetrievedChunk
 from app.repositories import document_repository
 
 
@@ -42,7 +42,7 @@ def _document_uuid(value: object) -> uuid.UUID | None:
         return None
 
 
-def _chunk_id(doc: Document) -> str | None:
+def _chunk_id(doc: RetrievedChunk) -> str | None:
     metadata = doc.metadata
     document_id = metadata.get("document_id")
     page = metadata.get("page_number")
@@ -52,7 +52,7 @@ def _chunk_id(doc: Document) -> str | None:
     return f"{document_id}_p{page}_c{index}"
 
 
-def _use_ready_document(doc: Document, ready_names: dict[uuid.UUID, str]) -> bool:
+def _use_ready_document(doc: RetrievedChunk, ready_names: dict[uuid.UUID, str]) -> bool:
     if _chunk_id(doc) is None:
         return False
     document_id = _document_uuid(doc.metadata["document_id"])
@@ -66,7 +66,7 @@ def _vector_retrieve(
     collection_id: uuid.UUID,
     query_text: str,
     top_k: int,
-) -> tuple[list[tuple[Document, float]], dict[str, tuple[Document, float]]]:
+) -> tuple[list[tuple[RetrievedChunk, float]], dict[str, tuple[RetrievedChunk, float]]]:
     """
     Run Chroma vector similarity search.
 
@@ -75,9 +75,9 @@ def _vector_retrieve(
     (results, lookup_dict)
 
     results:
-        list[tuple[Document, distance]] — same type as the old retrieve().
+        Ordered pairs of retrieved chunks and raw distances.
     lookup_dict:
-        {chroma_id: (Document, distance)} — used by _rrf_fuse() to avoid a
+        {chroma_id: (RetrievedChunk, distance)} — used by _rrf_fuse() to avoid a
         second Chroma call. The chroma_id is reconstructed from the document
         metadata (document_id, page_number, chunk_index), which is the exact
         format written during ingestion.
@@ -86,7 +86,7 @@ def _vector_retrieve(
         collection = get_existing_collection_store(str(collection_id))
         if collection is None:
             return [], {}
-        embedding = get_langchain_embeddings().embed_query(query_text)
+        embedding = embed_query(query_text)
         response = collection.query(
             query_embeddings=[embedding], n_results=top_k,
             include=["documents", "metadatas", "distances"],
@@ -94,15 +94,14 @@ def _vector_retrieve(
     except InvalidCollectionException:
         return [], {}
 
-    # Chroma groups rows by query. Keep the adapter's single-query shape and
-    # Document validation, including the error for a stored vector with no text.
+    # Chroma groups rows by query. Validate the text in the first result batch.
     results = [
-        (Document(page_content=text, metadata=metadata or {}), distance)
+        (RetrievedChunk(page_content=text, metadata=metadata or {}), distance)
         for text, metadata, distance in zip(
             response["documents"][0], response["metadatas"][0], response["distances"][0],
         )
     ]
-    lookup: dict[str, tuple[Document, float]] = {}
+    lookup: dict[str, tuple[RetrievedChunk, float]] = {}
     for doc, dist in results:
         chroma_id = _chunk_id(doc)
         if chroma_id is not None:
@@ -143,7 +142,7 @@ def _bm25_retrieve(
 # ── Reciprocal Rank Fusion ────────────────────────────────────────────────────
 
 def _rrf_fuse(
-    vector_lookup: dict[str, tuple[Document, float]],   # {chroma_id: (Doc, dist)}
+    vector_lookup: dict[str, tuple[RetrievedChunk, float]],
     bm25_results: list[tuple[str, float]],              # [(chroma_id, bm25_score)]
     k: int,
     top_k: int,
@@ -164,7 +163,7 @@ def _rrf_fuse(
 
     Parameters
     ----------
-    vector_lookup : dict mapping chroma_id → (LangChain Document, distance)
+    vector_lookup : dict mapping chroma_id → (RetrievedChunk, distance)
         Ordered by Vector search rank (dict insertion order preserved, Python 3.7+).
     bm25_results : list of (chroma_id, bm25_score) sorted best-first.
     k : RRF smoothing constant (60 is the TREC standard default).
@@ -217,7 +216,7 @@ def retrieve(
     query_text: str,
     db: Session | None,
     top_k: int | None = None,
-) -> list[tuple[Document, float]]:
+) -> list[tuple[RetrievedChunk, float]]:
     """Return ranked chunks of ready documents in an authorized collection.
 
     Request callers must verify collection ownership before retrieval.
@@ -295,7 +294,7 @@ def retrieve(
             if chroma_id not in vector_lookup
         ]
 
-        bm25_only_lookup: dict[str, tuple[Document, float]] = {}
+        bm25_only_lookup: dict[str, tuple[RetrievedChunk, float]] = {}
         if bm25_only_ids:
             try:
                 raw_collection = get_existing_collection_store(str(collection_id))
@@ -307,7 +306,7 @@ def retrieve(
                     text = (fetched["documents"] or [])[i] if i < len(fetched["documents"] or []) else ""
                     meta = (fetched["metadatas"] or [])[i] if i < len(fetched["metadatas"] or []) else {}
                     bm25_only_lookup[cid] = (
-                        Document(page_content=text, metadata=meta),
+                        RetrievedChunk(page_content=text, metadata=meta),
                         0.0,   # no cosine distance — this chunk came from BM25 only
                     )
             except Exception as exc:
@@ -338,7 +337,7 @@ def retrieve(
         candidates = candidates[:rrf_top_k]
 
         if mode == "hybrid":
-            final: list[tuple[Document, float]] = []
+            final: list[tuple[RetrievedChunk, float]] = []
             for c in candidates[:k]:
                 doc = c["doc"]
                 doc.metadata["_vector_rank"] = c["v_rank"]
@@ -383,7 +382,7 @@ def retrieve(
                 rerank_failed = True
             rerank_ms = int((time.perf_counter() - t_rerank) * 1000)
 
-            final: list[tuple[Document, float]] = []
+            final: list[tuple[RetrievedChunk, float]] = []
             for c in candidates[:k]:
                 doc = c["doc"]
                 doc.metadata["_vector_rank"] = c["v_rank"]
@@ -428,7 +427,7 @@ def retrieve(
         return trimmed
 
 
-def build_citations(retrieved: list[tuple[Document, float]]) -> list[dict]:
+def build_citations(retrieved: list[tuple[RetrievedChunk, float]]) -> list[dict]:
     """
     Turns retrieve()'s output into the internal citation shape:
     [{document_id, document_name, page_number, chunk_index, chunk_text, score}, ...]
