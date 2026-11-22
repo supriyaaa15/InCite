@@ -77,17 +77,26 @@ class TestDocumentEligibility(unittest.TestCase):
         return f"{chunk.metadata['document_id']}_p1_c0"
 
     def vector_candidates(self, *chunks):
-        store = Mock()
-        store.similarity_search_with_score.side_effect = (
-            lambda _query, k: [(doc, i / 10) for i, doc in enumerate(chunks[:k], 1)]
-        )
-        self.enterContext(patch.object(retrieval_service, "_get_vectorstore", return_value=store))
-        return store
+        def query(*, n_results, **kwargs):
+            selected = chunks[:n_results]
+            return {
+                "documents": [[doc.page_content for doc in selected]],
+                "metadatas": [[doc.metadata for doc in selected]],
+                "distances": [[i / 10 for i in range(1, len(selected) + 1)]],
+            }
+
+        self.store = Mock()
+        self.store.query.side_effect = query
+        self.enterContext(patch.object(retrieval_service, "get_existing_collection_store", return_value=self.store))
+        self.enterContext(patch.object(
+            retrieval_service, "get_langchain_embeddings",
+            return_value=SimpleNamespace(embed_query=lambda _: [1.0, 0.0]),
+        ))
+        return self.store
 
     def bm25_candidates(self, *chunks, hydrated=None):
         ranked = [(self.chunk_id(doc), 10.0 - i) for i, doc in enumerate(chunks)]
         self.enterContext(patch.object(retrieval_service, "_bm25_retrieve", return_value=ranked))
-        store = Mock()
         documents = hydrated if hydrated is not None else {self.chunk_id(doc): doc for doc in chunks}
 
         def fetch(ids, include):
@@ -98,9 +107,8 @@ class TestDocumentEligibility(unittest.TestCase):
                 "metadatas": [documents[chunk_id].metadata for chunk_id in found],
             }
 
-        store.get.side_effect = fetch
-        self.enterContext(patch.object(retrieval_service, "get_existing_collection_store", return_value=store))
-        return store
+        self.store.get.side_effect = fetch
+        return self.store
 
     def retrieve(self, mode="vector", top_k=5):
         with patch.object(settings, "RETRIEVAL_MODE", mode):
@@ -114,8 +122,11 @@ class TestDocumentEligibility(unittest.TestCase):
             results = self.retrieve(top_k=2)
         self.assertEqual([(d.page_content, score) for d, score in results], [("another", .6), ("ready", .7)])
         self.assertEqual([d.metadata["document_name"] for d, _ in results], ["another.pdf", "ready.pdf"])
+        self.assertEqual([c["score"] for c in retrieval_service.build_citations(results)], [.4, .3])
         self.assertEqual(execute.call_count, 1)
-        store.similarity_search_with_score.assert_called_once_with("query", k=8)
+        store.query.assert_called_once_with(
+            query_embeddings=[[1.0, 0.0]], n_results=8, include=["documents", "metadatas", "distances"],
+        )
 
     def test_hybrid_keeps_original_fusion_scores_and_admits_valid_bm25_only_hit(self):
         self.vector_candidates(self.deleted, self.ready)
@@ -124,6 +135,10 @@ class TestDocumentEligibility(unittest.TestCase):
         self.assertEqual([d.page_content for d, _ in results], ["ready", "another"])
         self.assertAlmostEqual(results[0][1], 1 / (settings.BM25_RRF_K + 2) + 1 / (settings.BM25_RRF_K + 4))
         self.assertAlmostEqual(results[1][1], 1 / (settings.BM25_RRF_K + 3))
+        self.assertEqual(
+            [c["score"] for c in retrieval_service.build_citations(results)],
+            [round(score * (settings.BM25_RRF_K + 1) / 2, 4) for _, score in results],
+        )
         self.assertEqual(store.get.call_args.kwargs["ids"], [self.chunk_id(self.second)])
 
     def test_hybrid_rejects_mismatched_hydrated_metadata(self):
@@ -141,6 +156,7 @@ class TestDocumentEligibility(unittest.TestCase):
             results = self.retrieve("hybrid_rerank", top_k=2)
         reranker.predict.assert_called_once_with([("query", "ready"), ("query", "another")])
         self.assertEqual([(d.page_content, score) for d, score in results], [("another", 3.0), ("ready", 1.0)])
+        self.assertEqual([c["score"] for c in retrieval_service.build_citations(results)], [.9526, .7311])
 
     def test_vector_fallback_still_checks_eligibility(self):
         self.vector_candidates(self.failed, self.ready)
@@ -170,7 +186,7 @@ class TestDocumentEligibility(unittest.TestCase):
     def test_missing_database_session_skips_search(self):
         store = self.vector_candidates(self.ready)
         self.assertEqual(retrieval_service.retrieve(self.collection, "query", None), [])
-        store.similarity_search_with_score.assert_not_called()
+        store.query.assert_not_called()
 
     def save_history(self, *turns):
         session_id = uuid4()
@@ -198,7 +214,7 @@ class TestDocumentEligibility(unittest.TestCase):
         store = self.vector_candidates(self.ready)
         with self.assertRaises(collection_service.CollectionNotFoundError):
             self.chat("What is covered?", self.other_user_id)
-        store.similarity_search_with_score.assert_not_called()
+        store.query.assert_not_called()
 
     def test_all_invalid_skips_generation_for_every_intent(self):
         self.vector_candidates(self.processing, self.failed, self.deleted, self.foreign, self.orphan)

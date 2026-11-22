@@ -14,8 +14,10 @@ python-dotenv==1.0.1
 chromadb==0.5.15
 PyMuPDF==1.24.10
 # pdfplumber==0.11.4
-langchain-chroma==0.1.4
+# Keep the Core and NumPy compatibility bounds previously supplied by the Chroma adapter.
+langchain-core>=0.3.49,<0.4
 langchain-groq==0.3.2
+numpy>=1.22.5,<2
 
 # CPU-only torch — default PyPI wheels on Linux bundle full CUDA support
 # (unlike Windows/Mac, which get CPU-only by default). Render's free tier

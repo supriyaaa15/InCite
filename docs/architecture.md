@@ -22,10 +22,14 @@ Request flow: **API routes** -> **services** (business logic) -> **repositories*
 
 ## Retrieval and chat
 
-Vector search in embedded Chroma is the configured default. Optional hybrid
-retrieval searches independent vector and BM25 pools, combines their original
-ranks with RRF, and fetches eligible BM25-only chunks from Chroma. The optional
-`hybrid_rerank` mode applies a CrossEncoder to eligible fused candidates.
+Vector search in embedded Chroma is the configured default. Retrieval uses the
+cached MiniLM model and native `Collection.query()` against the existing
+per-collection cosine index. It returns ordered LangChain Core `Document`
+and raw distance pairs. Optional hybrid retrieval searches independent vector
+and BM25 pools, combines their original ranks with RRF, and fetches eligible
+BM25-only chunks from Chroma. The optional `hybrid_rerank` mode applies a
+CrossEncoder to eligible fused candidates. See
+[ADR 004](decisions/004-native-chroma-vector-retrieval.md).
 
 Chat authorizes the collection and session before retrieval. PostgreSQL verifies
 which candidate documents are ready in that collection and supplies citation
