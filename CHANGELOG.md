@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Documentation
+
+- Updated the API, architecture, database, and frontend guides to match current behavior. Marked historical dependency and retrieval decisions and indexed the engineering milestones.
+
 ### Deletion lifecycle foundation
 
 - Document and collection deletion now records a durable request in PostgreSQL and returns `202 Accepted` with `cleanup_pending`. Pending targets disappear from active views and retrieval. Archived collection chats remain available through owner-only history endpoints.

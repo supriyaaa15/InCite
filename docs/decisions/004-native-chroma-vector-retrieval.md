@@ -1,5 +1,9 @@
 # ADR 004 — Use native Chroma for vector retrieval
 
+**Status** — Implemented. Native Chroma remains in use.
+[ADR 006](006-remove-langchain-core.md) superseded the original result type
+and embedding wrapper described here.
+
 ## Context
 
 Ingestion, BM25 hydration, and deletion already use the native Chroma SDK.

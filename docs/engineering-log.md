@@ -1,5 +1,19 @@
 # Engineering log
 
+This log records decisions, experiments, and verification as they happened.
+Test counts and deployment observations apply to the milestone where they
+appear. See the [architecture guide](architecture.md) for the current design.
+
+## Milestones
+
+- [Ready-only retrieval and chat history](#phase-1a--ready-only-retrieval)
+- [Disposable PostgreSQL and Chroma verification](#phase-1a--postgresql-and-chroma-verification)
+- [Durable deletion and recovery](#reliable-deletion-foundation), merged in PR #1
+- [Unused AI dependency cleanup](#unused-ai-dependency-cleanup), merged in PR #2
+- [Native Chroma vector retrieval](#native-chroma-vector-retrieval), merged in PR #3
+- [Native Groq provider](#native-groq-provider), merged in PR #4
+- [LangChain Core removal](#remove-langchain-core), merged in PR #5 with 131 unit and 33 integration tests passing
+
 ## Phase 1A — Ready-only retrieval
 
 Stale Chroma entries could supply text after their SQL document had been deleted or before ingestion finished. All chat intents now receive evidence from a shared PostgreSQL eligibility check. [ADR 001](decisions/001-postgresql-document-eligibility.md) explains the decision and the alternatives.

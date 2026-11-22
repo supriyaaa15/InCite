@@ -1,122 +1,70 @@
-# Architecture
+# InCite architecture
 
-## Layers
-Request flow: **API routes** -> **services** (business logic) -> **repositories**
-(DB access only) -> **models** (SQLAlchemy).
+The [HTTP API](api.md), [database schema](database.md), and [deployment guide](../README.md#deployment-and-upgrades) document the current implementation.
 
-- **API layer** (`app/api/`): thin route handlers, no business logic. Parses
-  requests, calls a service, returns the response.
-- **Services** (`app/services/`): business logic lives here. auth_service,
-  storage_service, ingestion_service, retrieval_service, chat_service.
-- **Repositories** (`app/repositories/`): DB queries only, no business logic.
-  Keeps SQLAlchemy specifics out of services — if the DB layer ever changes,
-  only repositories change.
-- **Models** (`app/models/`): SQLAlchemy ORM models, one file per table.
-- **Core** (`app/core/`): config, security (JWT/hashing), database session.
+## Application and storage
 
-## Data stores
-- **PostgreSQL**: users, collections, documents, chunks (metadata), chat
-  sessions, messages, query logs.
-- **Chroma**: chunk embeddings (the actual vectors). Chunks in Postgres store
-  a `chroma_id` pointing to the corresponding vector.
+The React/Vite frontend calls the FastAPI API with a Bearer token. API routes validate requests and enforce resource ownership with the service layer. Services orchestrate ingestion, retrieval, and generation. SQLAlchemy models and repositories represent and query PostgreSQL records. Alembic manages schema migrations.
 
-## Retrieval and chat
+- **PostgreSQL** is authoritative for ownership, document readiness, deletion state, chunk records, chat history, and query logs.
+- **Embedded Chroma** stores embeddings, searchable chunk text, and metadata in a per-collection cosine index. Reads use a native, non-creating collection lookup.
+- **Local filesystem** holds the original PDFs under `UPLOAD_DIR` and Chroma data under `CHROMA_PERSIST_PATH`.
+- **In-process BM25 indexes** are built lazily from Chroma text and cached per collection. Ingestion and deletion invalidate affected indexes.
 
-Vector search in embedded Chroma is the configured default. Retrieval encodes
-each query as a one-element batch with the same cached MiniLM model as
-ingestion. It uses native `Collection.query()` against the existing
-per-collection cosine index and returns ordered `RetrievedChunk` and raw
-distance pairs. Optional hybrid retrieval searches independent vector
-and BM25 pools, combines their original ranks with RRF, and fetches eligible
-BM25-only chunks from Chroma. The optional `hybrid_rerank` mode applies a
-CrossEncoder to eligible fused candidates. See
-[ADR 004](decisions/004-native-chroma-vector-retrieval.md) and
-[ADR 006](decisions/006-remove-langchain-core.md).
+## Ingestion and retrieval
 
-Chat authorizes the collection and session before retrieval. PostgreSQL verifies
-which candidate documents are ready in that collection and supplies citation
-filenames. Empty eligible evidence produces the existing refusal without a
-provider call. Prompts use fresh evidence and up to three earlier user messages
-for request context. The authorized transcript still includes assistant replies.
-See [ADR 001](decisions/001-postgresql-document-eligibility.md).
+Upload validates the PDF and creates a `processing` row. A FastAPI background task extracts text page by page with PyMuPDF, splits it into overlapping word-based chunks, and embeds each batch with the cached SentenceTransformer. Ingestion writes Chroma rows and matching PostgreSQL chunks using the same canonical IDs. Successful ingestion marks the document `ready`. Failure records `failed` and attempts partial-artifact cleanup.
 
-## Deletion lifecycle
+```mermaid
+flowchart TD
+    Browser["React / Vite"] --> API["FastAPI"]
+    API --> Upload["Validate and register upload"]
+    Upload --> PDF["Original PDF on disk"]
+    Upload --> Ingest["Background ingestion"]
+    Ingest --> SQL[("PostgreSQL")]
+    Ingest --> Chroma[("Embedded Chroma")]
+    API --> Chat["Authorize collection and session"]
+    Chat --> Vector["Cached MiniLM query embedding and vector search"]
+    Chat -->|"Hybrid modes"| BM25["BM25 keyword search"]
+    Chroma --> Vector
+    Chroma --> BM25
+    Vector --> Eligible["Filter candidates by SQL readiness and deletion state"]
+    BM25 --> Eligible
+    SQL --> Eligible
+    Eligible -->|"Vector mode"| Evidence["Eligible evidence"]
+    Eligible -->|"Hybrid modes"| Hybrid["Fuse ranks and hydrate eligible BM25-only hits"]
+    Hybrid -->|"Hybrid mode"| Evidence
+    Hybrid -->|"Hybrid rerank mode"| Rerank["CrossEncoder with RRF fallback"]
+    Rerank --> Evidence
+    Evidence -->|"Usable evidence"| Provider["Native Groq SDK"]
+    Evidence -->|"Empty evidence"| Refusal["Insufficient-context response"]
+    Provider --> Response["Chat response and stored transcript"]
+    Refusal --> Response
+```
 
-PostgreSQL stores deletion intent separately from document ingestion status.
-Active views and retrieval exclude pending documents and collections. The API
-acknowledges the recorded request and retains history. A FastAPI lifespan
-worker discovers due work at startup and periodically thereafter. It removes
-Chroma vectors and verified PDFs before finalizing SQL. Retry state lives in
-PostgreSQL. The supported storage layout uses one application process owning
-the embedded Chroma store and a per-collection OS lock on its local volume.
-See [ADR 002](decisions/002-reliable-deletion-lifecycle.md).
+Vector is the configured default. The service embeds each query as a one-element batch using the same cached MiniLM model as ingestion. Native Chroma returns ordered results with raw cosine distances. Retrieval uses the local, Pydantic-backed `RetrievedChunk` type for both vector hits and BM25-only hydration.
 
-## External services
-- The LLM boundary in `app/core/llm.py` wraps the official Groq SDK in a cached, synchronous provider. It sends each prompt as one user message, requests plain text or a named function tool, and validates tool arguments with the existing Pydantic schemas. QA and comparison services own fallback order. See [ADR 005](decisions/005-native-groq-provider.md).
+Hybrid modes search independent vector and BM25 pools. PostgreSQL checks candidate document IDs in a batch, excludes pending or unavailable documents, and supplies the filenames used in responses and prompts. Hybrid retrieval verifies hydrated chunk IDs and fuses candidates using their original ranks. Optional `hybrid_rerank` applies a CrossEncoder to eligible candidates and falls back to RRF order on reranker failure. A failed SQL eligibility check yields no evidence. See [ADR 001](decisions/001-postgresql-document-eligibility.md), [ADR 004](decisions/004-native-chroma-vector-retrieval.md), and [ADR 006](decisions/006-remove-langchain-core.md).
+
+## Generation and history
+
+QA, comparison, and recommendation use the same eligibility checks. QA filters evidence by citation score and returns source filenames, page numbers, excerpts, and scores. Comparison and recommendation return their own structured fields. The provider sends a single user-message prompt through the official Groq SDK and validates named tool arguments with Pydantic. Services choose the fallback model order. See [ADR 005](decisions/005-native-groq-provider.md).
+
+Prompts use fresh evidence for document claims. Up to three earlier user messages help interpret the request. Stored assistant replies remain available in the authorized transcript and are excluded from new prompts. Empty eligible evidence yields the shared insufficient-context response without a Groq call.
+
+## Deletion and recovery
+
+The API commits deletion intent to PostgreSQL before acknowledging the request. Pending targets are hidden from active views and excluded by subsequent eligibility checks. A FastAPI lifespan worker discovers due requests at startup and polls for more. It uses a per-collection OS lock shared with uploads and ingestion, removes matching vectors and verified PDF files, and then finalizes the SQL changes. Failed work uses bounded backoff stored in PostgreSQL. Busy collection locks briefly defer work without counting as failures. The worker retries incomplete work after restart. Collection cleanup preserves the archive row and history. See [ADR 002](decisions/002-reliable-deletion-lifecycle.md).
 
 ## Deployment
-Single Render web service runs the FastAPI app, with Chroma embedded inside it (PersistentClient) rather than as a separate service — avoids Render's requirement that any service receiving private network traffic be on a paid tier. See design-decisions.md for the full reasoning and alternatives considered (paid private Chroma service, Qdrant Cloud, AWS).
 
-- Backend + Postgres: Render
-- Frontend: Vercel
-- Run one FastAPI process and one replica per embedded Chroma store. The
-  backend image explicitly passes `--workers 1`, including when
-  `WEB_CONCURRENCY` is present. Keep that setting when overriding the command.
-- Stop old writers and back up PostgreSQL, Chroma, and uploads before running
-  `alembic upgrade head` against the intended database. Confirm the revision
-  before starting the new process. Then check app, PostgreSQL, and Chroma
-  readiness and pending cleanup. See the [deployment steps](../README.md#deployment-and-upgrades).
-- The Docker build excludes local configuration and runtime artifacts. Supply
-  credentials at runtime and keep backups and custom storage outside the build
-  context.
-- Chosen over AWS EC2 for setup speed within a 30-day timeline — see
-  design-decisions.md for the full reasoning.
-  Known trade-off: Chroma's embedded data isn't guaranteed to survive a redeploy unless the persist path is backed by a persistent disk. Accepted for this project — documents can be re-uploaded after a redeploy; not acceptable for a real production system with real users.
+Run one application process and one replica per embedded Chroma store on local persistent storage with working OS locks. The backend Dockerfile sets `--workers 1` explicitly, including when `WEB_CONCURRENCY` is set. Persist both Chroma and uploads across deployments and supply credentials through the runtime environment. The frontend can be built separately with Vite and configured through `VITE_API_BASE_URL` and backend CORS settings.
 
-## Historical extensibility notes
+For upgrades, stop old writers, back up PostgreSQL, Chroma, and uploads, then run `alembic upgrade head` against the intended database. Confirm the revision before starting the new process. Check the three health response bodies and confirm that due cleanup resumes.
 
-These original design notes describe where proposed features would fit. The
-sections above describe the current retrieval and chat behavior.
+## Known limits and future proposals
 
-**Phase 2 — Confidence-aware RAG**: `retrieval_service.build_citations()`
-already returns a `score` per chunk, and that data already reaches
-`chat_service.send_message()`. Adding a confidence check is a conditional
-around the existing `citations` list, plus one new config value
-(e.g. `CONFIDENCE_THRESHOLD`) — no new data path required.
-
-**Phase 2 — Retrieval Transparency**: the API already returns full
-citation detail (document, page, chunk text, score) in `ChatResponse`.
-This phase is almost entirely a frontend rendering task — the backend
-already exposes everything needed.
-
-**Phase 2 — Follow-up Question Suggestions**: purely additive. A new
-function alongside `_generate_answer()` in `chat_service.py`, and one new
-optional field on `ChatResponse`. Doesn't touch retrieval or existing
-fields, so it can't break anything already working.
-
-**Phase 3 — Cross-Document Comparison**: every chunk stored in Chroma
-already carries `document_id` in its metadata (set during ingestion).
-Chroma's query `where` filter can already scope retrieval to specific
-document(s) within a collection — this phase needs a new
-`comparison_service.py` and route, but no changes to storage or ingestion.
-
-**Phase 3 — Document Intelligence Report**: deliberately NOT pre-adding
-empty columns (reading_level, topics, ocr_status, etc.) to the documents
-table now — that's speculative schema, and Alembic already makes adding
-real columns a fast, low-risk migration when these fields actually have
-logic behind them. The extensibility here is process (clean migration
-tooling), not pre-built structure.
-
-**Phase 4 — Hybrid Search / Reranking**: this is exactly why
-`retrieval_service.py` was extracted from `chat_service.py` (see
-design-decisions.md). Combining BM25 with vector search, or adding a
-reranking step, both happen entirely inside `retrieval_service.retrieve()`
-— every caller (chat, and later comparison) is unaffected.
-
-**Phase 4 — OCR**: `app/utils/pdf_processing.py` is already isolated from
-ingestion orchestration. An OCR fallback for pages with no extractable
-text slots in there as a new function, called conditionally, without
-restructuring `ingestion_service.py`. Known current gap: pages with no
-extractable text are silently skipped rather than flagged — worth fixing
-when OCR is actually built, tracked in design-decisions.md.
-
+- Eligibility is a snapshot. A request past the eligibility check can still finish during concurrent deletion. Retained history can include old citations and excerpts.
+- Cleanup assumes cooperating writers and one process per embedded store. See ADR 002 for recovery limits, including legacy artifacts with incomplete ownership data and Linux full-process crash verification.
+- Current ingestion requires extractable PDF text. OCR, table extraction, and multimodal indexing are future proposals. Hybrid and reranking are already implemented as optional modes.
+- The [historical design journal](design-decisions.md) records earlier provider, hosting, and retrieval choices. See the [engineering log](engineering-log.md) for the verification associated with each milestone.
