@@ -99,7 +99,7 @@ class TestDocumentEligibility(unittest.TestCase):
             }
 
         store.get.side_effect = fetch
-        self.enterContext(patch.object(retrieval_service, "get_collection_store", return_value=store))
+        self.enterContext(patch.object(retrieval_service, "get_existing_collection_store", return_value=store))
         return store
 
     def retrieve(self, mode="vector", top_k=5):

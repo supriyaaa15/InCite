@@ -74,3 +74,52 @@ two unit and six integration dependency deprecation warnings.
 
 Both edited frontend pages passed JSX parsing. The full frontend build
 could not run because no Node.js version was configured.
+
+## Physical deletion and recovery
+
+The FastAPI worker discovers pending requests in PostgreSQL on startup and
+polls every two seconds. It removes matching Chroma vectors, invalidates
+BM25, and removes the original PDF from the verified upload directory.
+Only then does a short PostgreSQL transaction delete the document and its
+chunk rows. Collection cleanup waits for all document rows to be removed,
+then removes the collection's Chroma index and empty upload directory.
+Archived collection metadata and authorized chat history remain available.
+
+The migration adds durable attempt counts, retry times, and failed-step
+labels. Retry delays start at five seconds and cap at five minutes. A
+restart resumes pending work, including requests interrupted after an
+external deletion. Missing artifacts count as success. Ambiguous paths,
+conflicting vector identities, and unregistered files remain for manual
+review. The worker does not hold a database transaction during Chroma or
+filesystem I/O.
+
+Upload, ingestion, and cleanup share a per-collection OS file lock. An
+ingestion write can finish after DELETE is accepted, but cleanup cannot
+finish while that writer holds the lock. The embedded Chroma deployment
+supports one application process per persistent store. Before rollout,
+stop old writers and apply `alembic upgrade head` before starting the
+upgraded application. See [ADR 002](decisions/002-reliable-deletion-lifecycle.md)
+for transaction boundaries, retry behavior, and deployment limits.
+
+Run both suites from the repository root in PowerShell.
+
+```powershell
+.\.venv\Scripts\python.exe -B scripts/run_phase1a_integration.py --unit
+.\.venv\Scripts\python.exe -B scripts/run_phase1a_integration.py
+```
+
+The final run passed **83 unit tests** and **32 integration cases** with
+zero failures, errors, or skips. Pytest reported two unit and six
+integration dependency deprecation warnings. The integration runner used
+disposable PostgreSQL 16.14, Chroma 0.5.15 with temporary persistence,
+temporary uploaded PDFs, synthetic records, and fake model adapters. It
+removed the disposable container and scratch data after testing.
+
+The tests checked PostgreSQL, Chroma, and file contents after deletion,
+including neighboring collection isolation, missing artifacts, retry after
+errors before and after external operations, and a failed PostgreSQL
+finalization. They exercised a Chroma write finishing after DELETE was
+accepted, followed by cleanup, and recovery during a fresh FastAPI
+lifespan. A separate Windows subprocess test verified OS lock release on
+abrupt process exit. Killing and restarting the full application during
+cleanup and exercising the POSIX lock path remain deployment checks.

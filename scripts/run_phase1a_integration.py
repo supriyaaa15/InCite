@@ -39,6 +39,7 @@ def scratch_env(scratch):
         HF_HUB_OFFLINE="1",
         TRANSFORMERS_OFFLINE="1",
         ANONYMIZED_TELEMETRY="FALSE",
+        DELETION_CLEANUP_ENABLED="false",
         OTEL_SDK_DISABLED="true",
     )
     return env

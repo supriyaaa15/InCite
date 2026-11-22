@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -42,14 +42,17 @@ def get_collection(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Collection not found")
 
 
-@router.delete("/{collection_id}", status_code=status.HTTP_202_ACCEPTED)
+@router.delete("/{collection_id}", status_code=status.HTTP_202_ACCEPTED,
+               responses={204: {"description": "Cleanup already complete"}})
 def delete_collection(
     collection_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     try:
-        deletion_service.request_deletion(db, current_user.id, collection_id=collection_id)
+        completed = deletion_service.request_deletion(db, current_user.id, collection_id=collection_id)
     except deletion_service.DeletionTargetNotFound:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Collection not found")
+    if completed:
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
     return {"status": "cleanup_pending"}

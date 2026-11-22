@@ -1,6 +1,7 @@
 from functools import lru_cache
 
 import chromadb
+from chromadb.errors import InvalidCollectionException
 
 from app.core.config import settings
 
@@ -35,3 +36,10 @@ def get_collection_store(collection_id: str):
     return client.get_or_create_collection(
         name=f"collection_{collection_id}", metadata={"hnsw:space": "cosine"}
     )
+
+
+def get_existing_collection_store(collection_id: str):
+    try:
+        return get_chroma_client().get_collection(name=f"collection_{collection_id}")
+    except InvalidCollectionException:
+        return None

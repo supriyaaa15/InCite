@@ -38,8 +38,12 @@ See [ADR 001](decisions/001-postgresql-document-eligibility.md).
 
 PostgreSQL stores deletion intent separately from document ingestion status.
 Active views and retrieval exclude pending documents and collections. The API
-acknowledges the recorded request and retains history. Physical cleanup and
-restart recovery are pending. See [ADR 002](decisions/002-reliable-deletion-lifecycle.md).
+acknowledges the recorded request and retains history. A FastAPI lifespan
+worker discovers due work at startup and periodically thereafter. It removes
+Chroma vectors and verified PDFs before finalizing SQL. Retry state lives in
+PostgreSQL. The supported storage layout uses one application process owning
+the embedded Chroma store and a per-collection OS lock on its local volume.
+See [ADR 002](decisions/002-reliable-deletion-lifecycle.md).
 
 ## External services
 - **LLM API** (Groq via ChatGroq): called by chat_service and comparison_service to generate answers

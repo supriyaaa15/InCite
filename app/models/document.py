@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Text
+from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Text, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -19,7 +19,7 @@ class Document(TimestampedUUIDBase):
     __tablename__ = "documents"
 
     collection_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("collections.id", ondelete="CASCADE"), nullable=False
+        UUID(as_uuid=True), ForeignKey("collections.id", ondelete="CASCADE"), nullable=False, index=True
     )
     filename: Mapped[str] = mapped_column(String, nullable=False)
     file_path: Mapped[str] = mapped_column(String, nullable=False)  # where storage_service put it
@@ -33,6 +33,9 @@ class Document(TimestampedUUIDBase):
     error_code: Mapped[str | None] = mapped_column(String, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     delete_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cleanup_attempts: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    cleanup_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cleanup_error: Mapped[str | None] = mapped_column(String(120))
 
     collection: Mapped["Collection"] = relationship(back_populates="documents")
     chunks: Mapped[list["Chunk"]] = relationship(

@@ -3,8 +3,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import auth_routes, chat_routes, collection_routes, document_routes, health_routes
 from app.core.config import settings
+from app.services.deletion_cleanup import cleanup_lifespan
 
-app = FastAPI(title="InCite API")
+app = FastAPI(title="InCite API", lifespan=cleanup_lifespan)
 
 app.add_middleware(
     CORSMiddleware,

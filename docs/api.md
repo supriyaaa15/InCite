@@ -27,7 +27,9 @@
   and retrieval. The PDF, SQL chunks, and vectors remain pending cleanup.
 
 Repeating an authorized deletion request returns the same pending status and
-preserves the original request time. Missing and foreign IDs return `404`.
+preserves the original request time while cleanup is pending. Repeating a
+collection DELETE after cleanup returns `204 No Content`. After a document row
+is physically removed its ID returns `404`, as do missing and foreign IDs.
 
 ## Chat
 - `POST /collections/{id}/chat` — {message, session_id?} -> {answer, citations}

@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
 import re
+import time
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -45,7 +46,8 @@ if not (
 ):
     raise RuntimeError("Integration tests require the disposable settings from the Phase 1A runner.")
 
-from app.core.chroma_client import get_collection_store
+from app.core import bm25_store
+from app.core.chroma_client import get_collection_store, get_existing_collection_store
 from app.api import document_routes
 from app.core.config import settings
 from app.core.database import SessionLocal, engine
@@ -55,7 +57,7 @@ from app.models import ChatSession, Chunk, Collection, Document, Message, User
 from app.models.chat import MessageRole
 from app.models.document import DocumentStatus
 from app.repositories import document_repository
-from app.services import chat_service, comparison_service, deletion_service, ingestion_service, retrieval_service
+from app.services import chat_service, comparison_service, deletion_cleanup, deletion_service, ingestion_service, retrieval_service
 
 
 QUESTIONS = ("What do the notes explain?", "Compare alpha.pdf and beta.pdf", "Which PDF should I read?")
@@ -221,6 +223,183 @@ def auth(user_id):
     return {"Authorization": f"Bearer {create_access_token(str(user_id))}"}
 
 
+def _cleanup_fixture(corpus, key="alpha"):
+    document_id, chunk_id = corpus.chunks[key]
+    pdf = scratch / "uploads" / str(corpus.owner_id) / str(corpus.collection_id) / f"{document_id}.pdf"
+    pdf.parent.mkdir(parents=True, exist_ok=True)
+    pdf.write_bytes(b"synthetic PDF artifact")
+    corpus.db.get(Document, document_id).file_path = str(pdf)
+    corpus.db.add(Chunk(document_id=document_id, page_number=1, chunk_index=0,
+                        content="Synthetic chunk", chroma_id=chunk_id))
+    corpus.db.commit()
+    return document_id, chunk_id, pdf
+
+
+def _assert_cleaned(corpus, document_id, chunk_id, pdf):
+    with SessionLocal() as db:
+        assert db.get(Document, document_id) is None
+        assert db.scalar(select(Chunk.id).where(Chunk.document_id == document_id)) is None
+    assert not corpus.store.get(ids=[chunk_id])["ids"]
+    assert not pdf.exists()
+
+
+def test_cleanup_is_scoped_and_evicts_bm25(corpus):
+    document_id, chunk_id, pdf = _cleanup_fixture(corpus)
+    _, neighbor_id, neighbor_pdf = _cleanup_fixture(corpus, "beta")
+    neighbor_store = get_collection_store(str(corpus.second_owned_id))
+    neighbor_store.upsert(ids=[chunk_id], embeddings=[[1.0, 0.0]], documents=["Another collection"])
+    owner_headers = auth(corpus.owner_id)
+    with TestClient(app) as client:
+        assert client.delete(f"/documents/{document_id}", headers=auth(corpus.other_user_id)).status_code == 404
+        deletion_cleanup._cleanup_target(corpus.collection_id, document_id)
+        assert pdf.exists()
+        assert client.delete(f"/documents/{document_id}", headers=owner_headers).status_code == 202
+        assert chunk_id in bm25_store.get_index(corpus.collection_id, corpus.store).chroma_ids
+        deletion_cleanup._cleanup_target(corpus.second_owned_id, document_id)
+        assert pdf.exists()
+        deletion_cleanup._cleanup_target(corpus.collection_id, document_id)
+        deletion_cleanup._cleanup_target(corpus.collection_id, document_id)
+        assert client.delete(f"/documents/{document_id}", headers=owner_headers).status_code == 404
+    _assert_cleaned(corpus, document_id, chunk_id, pdf)
+    assert neighbor_pdf.exists() and corpus.store.get(ids=[neighbor_id])["ids"] == [neighbor_id]
+    assert neighbor_store.get(ids=[chunk_id])["ids"] == [chunk_id]
+    assert chunk_id not in bm25_store.get_index(corpus.collection_id, corpus.store).chroma_ids
+
+
+def test_collection_cleanup_removes_documents_and_retains_history(corpus):
+    artifacts = [_cleanup_fixture(corpus, key) for key in ("alpha", "beta", "processing", "failed")]
+    neighbor = get_collection_store(str(corpus.second_owned_id))
+    headers = auth(corpus.owner_id)
+    url = f"/collections/{corpus.collection_id}"
+    with TestClient(app) as client:
+        assert client.delete(url, headers=headers).status_code == 202
+        deletion_cleanup._cleanup_target(corpus.collection_id, None)
+        assert get_existing_collection_store(str(corpus.collection_id)) is not None
+        for document_id, chunk_id, pdf in artifacts:
+            deletion_cleanup._cleanup_target(corpus.collection_id, document_id)
+            _assert_cleaned(corpus, document_id, chunk_id, pdf)
+        # The orphan vector belongs to this archived Chroma collection.
+        assert corpus.store.get(ids=[corpus.chunks["orphan"][1]])["ids"]
+        deletion_cleanup._cleanup_target(corpus.collection_id, None)
+        deletion_cleanup._cleanup_target(corpus.collection_id, None)
+        assert client.delete(url, headers=headers).status_code == 204
+        assert client.get(url, headers=headers).status_code == 404
+        history = f"/sessions/{corpus.session_id}/messages"
+        assert [row["content"] for row in client.get(history, headers=headers).json()] == [RECENT_USER, OLD_ASSISTANT]
+        assert client.get(history, headers=auth(corpus.other_user_id)).status_code == 404
+    with SessionLocal() as db:
+        assert db.get(Collection, corpus.collection_id).cleanup_completed_at is not None
+        assert retrieval_service.retrieve(corpus.collection_id, "notes", db) == []
+    assert get_existing_collection_store(str(corpus.collection_id)) is None
+    assert get_existing_collection_store(str(corpus.second_owned_id)).name == neighbor.name
+    assert not artifacts[0][2].parent.exists()
+
+
+@pytest.mark.parametrize("step,when", [
+    ("chroma", "before"), ("chroma", "after"),
+    ("filesystem", "before"), ("filesystem", "after"), ("postgres", "before"),
+])
+def test_cleanup_retries_partial_work(corpus, monkeypatch, step, when):
+    document_id, chunk_id, pdf = _cleanup_fixture(corpus)
+    deletion_service.request_deletion(corpus.db, corpus.owner_id, document_id=document_id)
+    calls = []
+
+    def inject(original):
+        def fail(*args, **kwargs):
+            calls.append(step)
+            if when == "after":
+                original(*args, **kwargs)
+            raise OSError("synthetic interruption")
+        return fail
+
+    def fail_sql(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("DELETE FROM documents WHERE"):
+            calls.append(step)
+            return "SELECT 1 / 0", {}
+        return statement, parameters
+
+    with monkeypatch.context() as overrides:
+        if step == "chroma":
+            overrides.setattr(deletion_cleanup, "_delete_document_vectors", inject(deletion_cleanup._delete_document_vectors))
+        elif step == "filesystem":
+            storage = deletion_cleanup.storage_service
+            overrides.setattr(storage, "delete_document_pdf", inject(storage.delete_document_pdf))
+        else:
+            event.listen(engine, "before_cursor_execute", fail_sql, retval=True)
+        try:
+            deletion_cleanup._cleanup_target(corpus.collection_id, document_id)
+            deletion_cleanup._cleanup_target(corpus.collection_id, document_id)
+        finally:
+            if step == "postgres":
+                event.remove(engine, "before_cursor_execute", fail_sql)
+    assert calls == [step]  # The immediate retry was deferred.
+    assert pdf.exists() == (step == "chroma" or (step, when) == ("filesystem", "before"))
+    assert bool(corpus.store.get(ids=[chunk_id])["ids"]) == ((step, when) == ("chroma", "before"))
+    with SessionLocal.begin() as db:
+        pending = db.get(Document, document_id)
+        assert pending.delete_requested_at is not None and pending.cleanup_attempts == 1
+        assert pending.cleanup_error.startswith(f"{step}:")
+        assert pending.cleanup_retry_at > datetime.now(timezone.utc)
+        pending.cleanup_retry_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    deletion_cleanup._cleanup_target(corpus.collection_id, document_id)
+    _assert_cleaned(corpus, document_id, chunk_id, pdf)
+
+
+def test_cleanup_accepts_already_missing_artifacts(corpus):
+    document_id, chunk_id, pdf = _cleanup_fixture(corpus)
+    pdf.unlink()
+    corpus.store.delete(ids=[chunk_id])
+    deletion_service.request_deletion(corpus.db, corpus.owner_id, document_id=document_id)
+    deletion_cleanup._cleanup_target(corpus.collection_id, document_id)
+    _assert_cleaned(corpus, document_id, chunk_id, pdf)
+
+
+def test_cleanup_preserves_an_outside_path(corpus):
+    document_id, _, pdf = _cleanup_fixture(corpus)
+    outside = scratch / f"outside-{document_id}.pdf"
+    outside.write_bytes(b"outside configured upload directory")
+    corpus.db.get(Document, document_id).file_path = str(outside)
+    corpus.db.commit()
+    deletion_service.request_deletion(corpus.db, corpus.owner_id, document_id=document_id)
+    deletion_cleanup._cleanup_target(corpus.collection_id, document_id)
+    assert outside.read_bytes() == b"outside configured upload directory" and pdf.exists()
+    with SessionLocal() as db:
+        assert db.get(Document, document_id).cleanup_error == "filesystem: UnsafeUploadPath"
+
+
+def test_collection_cleanup_preserves_unregistered_files(corpus):
+    collection_id = corpus.second_owned_id
+    leftover = scratch / "uploads" / str(corpus.owner_id) / str(collection_id) / "unregistered.pdf"
+    leftover.parent.mkdir(parents=True, exist_ok=True)
+    leftover.write_bytes(b"synthetic unregistered upload")
+    deletion_service.request_deletion(corpus.db, corpus.owner_id, collection_id=collection_id)
+    deletion_cleanup._cleanup_target(collection_id, None)
+    assert leftover.read_bytes() == b"synthetic unregistered upload"
+    with SessionLocal() as db:
+        collection = db.get(Collection, collection_id)
+        assert collection.cleanup_completed_at is None
+        assert collection.cleanup_error.startswith("filesystem:")
+        assert collection.cleanup_retry_at is not None
+
+
+def test_cleanup_resumes_on_application_start(corpus, monkeypatch):
+    document_id, chunk_id, pdf = _cleanup_fixture(corpus)
+    with TestClient(app) as client:
+        assert client.delete(f"/documents/{document_id}", headers=auth(corpus.owner_id)).status_code == 202
+    assert pdf.exists()
+    monkeypatch.setattr(settings, "DELETION_CLEANUP_ENABLED", True)
+    with TestClient(app):
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            with SessionLocal() as db:
+                if db.get(Document, document_id) is None:
+                    break
+            time.sleep(0.05)
+        else:
+            pytest.fail("Startup worker did not discover the persisted request.")
+    _assert_cleaned(corpus, document_id, chunk_id, pdf)
+
+
 def test_document_deletion_is_owned_durable_and_repeatable(corpus):
     document_id, chunk_id = corpus.chunks["alpha"]
     pdf = scratch / "uploads" / f"{document_id}.pdf"
@@ -338,15 +517,24 @@ def test_stale_worker_cannot_publish_ready(corpus, target):
 
 
 def test_in_flight_chroma_batch_cannot_register_sql_chunks_after_delete(corpus, monkeypatch):
-    document_id, _ = corpus.chunks["processing"]
+    document_id, chunk_id = corpus.chunks["processing"]
+    pdf = scratch / "uploads" / str(corpus.owner_id) / str(corpus.collection_id) / f"{document_id}.pdf"
+    pdf.parent.mkdir(parents=True, exist_ok=True)
+    pdf.write_bytes(b"synthetic PDF artifact")
+    corpus.db.get(Document, document_id).file_path = str(pdf)
+    corpus.db.commit()
     calls = []
 
     def upsert(**kwargs):
-        corpus.store.upsert(**kwargs)
         calls.extend(kwargs["ids"])
         with SessionLocal() as separate:
             separate.execute(text("SET LOCAL lock_timeout = '2s'"))
             deletion_service.request_deletion(separate, corpus.owner_id, document_id=document_id)
+        deletion_cleanup._cleanup_target(corpus.collection_id, document_id)
+        with SessionLocal() as fresh:
+            assert fresh.get(Document, document_id) is not None
+        assert pdf.exists() and corpus.store.get(ids=kwargs["ids"])["ids"] == kwargs["ids"]
+        corpus.store.upsert(**kwargs)  # Complete the in-flight write after DELETE.
 
     def pages(path):
         yield 1, "An embedding batch written while deletion is requested."
@@ -362,6 +550,11 @@ def test_in_flight_chroma_batch_cannot_register_sql_chunks_after_delete(corpus, 
         document = fresh.get(Document, document_id)
         assert document.delete_requested_at is not None and document.status == DocumentStatus.processing
         assert fresh.scalar(select(Chunk.id).where(Chunk.document_id == document_id)) is None
+    deletion_cleanup._cleanup_target(corpus.collection_id, document_id)
+    _assert_cleaned(corpus, document_id, chunk_id, pdf)
+    calls_before = calls.copy()
+    ingestion_service.ingest_document(str(document_id))
+    assert calls == calls_before
 
 
 def test_upload_rechecks_collection_after_validation(corpus, monkeypatch):

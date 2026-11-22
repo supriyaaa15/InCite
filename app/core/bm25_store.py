@@ -22,13 +22,13 @@ Both call sites are in ingestion_service.py and document_routes.py.
 
 Thread safety
 -------------
-Module-level dict writes are GIL-protected in CPython, which is the
-runtime this application uses. For other runtimes, add a threading.Lock
-around cache reads/writes.
+Builds run outside the cache lock. Invalidation advances a generation so
+a concurrent build cannot republish an older snapshot.
 """
 
 import logging
 import re
+from threading import Lock
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -53,6 +53,8 @@ class _BM25Index:
 # ── Module-level cache ────────────────────────────────────────────────────────
 
 _cache: dict[str, _BM25Index] = {}   # key: str(collection_id)
+_cache_lock = Lock()
+_cache_generation = 0
 
 
 # ── Tokenizer ─────────────────────────────────────────────────────────────────
@@ -83,8 +85,11 @@ def invalidate(collection_id: str | uuid.UUID) -> None:
 
     Safe to call even if no index is cached (no-op).
     """
+    global _cache_generation
     key = str(collection_id)
-    dropped = _cache.pop(key, None)
+    with _cache_lock:
+        _cache_generation += 1
+        dropped = _cache.pop(key, None)
     if dropped is not None:
         logger.debug(
             "BM25 cache invalidated | collection_id=%s built_at=%s",
@@ -116,12 +121,17 @@ def get_index(
         this is never called.
     """
     key = str(collection_id)
-    if key in _cache:
-        return _cache[key]
+    with _cache_lock:
+        cached = _cache.get(key)
+        if cached is not None:
+            return cached
+        generation = _cache_generation
 
     logger.debug("BM25 cache miss — building index | collection_id=%s", key)
     index = _build_index(collection_id, chroma_collection, db)
-    _cache[key] = index
+    with _cache_lock:
+        if generation == _cache_generation:
+            _cache[key] = index
     logger.info(
         "BM25 index built | collection_id=%s chunks=%d built_at=%s",
         key,
