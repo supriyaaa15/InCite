@@ -8,12 +8,11 @@ import uuid
 from typing import Optional
 
 from chromadb.errors import InvalidCollectionException
-from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.core.chroma_client import get_chroma_client, get_existing_collection_store
+from app.core.chroma_client import get_existing_collection_store
 from app.core.config import settings
 from app.core.embeddings import get_langchain_embeddings
 from app.repositories import document_repository
@@ -30,24 +29,6 @@ def _get_reranker(model_name: str):
     """
     from sentence_transformers import CrossEncoder
     return CrossEncoder(model_name)
-
-
-# ── Chroma vector store accessor ─────────────────────────────────────────────
-
-def _get_vectorstore(collection_id: uuid.UUID) -> Chroma:
-    """
-    Attaches to the existing per-collection Chroma collection (created
-    during ingestion, via core/chroma_client.get_collection_store — that
-    remains the only place a collection is actually created, so the
-    cosine-distance metric set at creation is never at risk of being
-    silently overridden here).
-    """
-    return Chroma(
-        client=get_chroma_client(),
-        collection_name=f"collection_{collection_id}",
-        embedding_function=get_langchain_embeddings(),
-        create_collection_if_not_exists=False,
-    )
 
 
 # ── Vector retrieval ──────────────────────────────────────────────────────────
@@ -102,11 +83,25 @@ def _vector_retrieve(
         format written during ingestion.
     """
     try:
-        vectorstore = _get_vectorstore(collection_id)
-        results = vectorstore.similarity_search_with_score(query_text, k=top_k)
+        collection = get_existing_collection_store(str(collection_id))
+        if collection is None:
+            return [], {}
+        embedding = get_langchain_embeddings().embed_query(query_text)
+        response = collection.query(
+            query_embeddings=[embedding], n_results=top_k,
+            include=["documents", "metadatas", "distances"],
+        )
     except InvalidCollectionException:
         return [], {}
 
+    # Chroma groups rows by query. Keep the adapter's single-query shape and
+    # Document validation, including the error for a stored vector with no text.
+    results = [
+        (Document(page_content=text, metadata=metadata or {}), distance)
+        for text, metadata, distance in zip(
+            response["documents"][0], response["metadatas"][0], response["distances"][0],
+        )
+    ]
     lookup: dict[str, tuple[Document, float]] = {}
     for doc, dist in results:
         chroma_id = _chunk_id(doc)

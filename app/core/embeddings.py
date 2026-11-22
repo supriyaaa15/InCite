@@ -17,14 +17,7 @@ def get_embedder() -> SentenceTransformer:
 
 
 class SentenceTransformerEmbeddings(Embeddings):
-    """
-    LangChain's vectorstore integrations expect an object implementing its
-    Embeddings interface — just embed_documents() and embed_query(). This
-    wraps our existing get_embedder() singleton instead of letting
-    LangChain load its own separate copy of the model, so ingestion (raw
-    sentence-transformers calls) and retrieval (through this wrapper)
-    always produce identical embeddings from the exact same weights.
-    """
+    """Share the cached SentenceTransformer across ingestion and retrieval."""
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         return get_embedder().encode(texts).tolist()

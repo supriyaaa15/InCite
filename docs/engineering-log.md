@@ -187,3 +187,57 @@ The two project runner commands above passed **83 unit tests** and
 errors, or skips. Pytest reported two unit and six integration dependency
 deprecation warnings. The integration runner used PostgreSQL 16.14 and
 Chroma 0.5.15 in disposable storage and removed its container.
+
+## Native Chroma vector retrieval
+
+The preceding MiniLM comparison used identical query vectors against the same
+temporary cosine collection. All 19 rows matched in order, text, normalized
+metadata, canonical chunk IDs, and raw distances. The maximum distance
+difference was zero. The production vector query now uses the same native
+SDK as ingestion and BM25 hydration. It calls the existing read-only
+collection lookup, obtains a query vector from the shared MiniLM model, and
+converts the first query batch to the existing `(Document, distance)` pairs.
+
+The retrieval service is five source lines shorter, including comments.
+The refactor removes the adapter factory and makes the native result conversion
+explicit. It keeps the canonical metadata-derived ID, the existing
+missing-collection and malformed-text behavior, and the ranking, eligibility,
+and citation logic. Core's `Document` and embedding interface remain available.
+The benchmark still reconstructs the same IDs, and local scripts that check
+`isinstance(result, Document)` retain that type contract. The Groq adapter is
+unchanged. See [ADR 004](decisions/004-native-chroma-vector-retrieval.md).
+
+Removing `langchain-chroma` drops one installed distribution. NumPy and
+LangChain Core already existed in the dependency graph. Their previous
+compatibility bounds are now explicit so removing the Chroma adapter does
+not widen the version ranges. In the previous Windows environment, the
+removed adapter accounted for 45,858 bytes of recorded non-bytecode package
+files. No application latency or image-size comparison was performed.
+
+Six permanent tests exercise the production function against disposable
+Chroma with deterministic vectors. A separate side-by-side check ran the
+production function and the old 0.1.4 adapter against the same real index.
+The tied and oversized results, canonical IDs, null metadata, empty and
+filtered results, and missing-collection behavior matched. Both paths
+raised a `Document` validation error for a vector without stored text.
+The eligibility tests also check citation scores in all three modes.
+
+A clean Windows Python 3.11.18 install resolved 134 runtime distributions
+from 21 direct declarations, excluding bootstrap and pytest packages.
+The preceding clean install resolved 135 from 20 declarations. Core and
+NumPy are now declared directly, and `langchain-chroma` is absent. The
+resolved versions were Chroma 0.5.15, LangChain Core 0.3.86,
+`langchain-groq` 0.3.2, Groq 0.37.1, NumPy 1.26.4, Torch 2.4.1+cpu, and
+Sentence Transformers 3.2.0. `pip check` passed with pytest 8.3.5 installed.
+Offline smoke checks verified the Torch-to-NumPy conversion, plain and
+structured Groq responses with a mock HTTP transport, benchmark chunk IDs,
+and import of the local Phase 4 utility. No live provider calls were made.
+
+The clean environment passed **89 unit-runner tests**, including the six
+native Chroma cases, and **33 integration tests**, with zero failures,
+errors, or skips. Pytest reported two unit-runner and six integration
+dependency deprecation warnings. The integration suite used disposable
+PostgreSQL 16.14 and Chroma 0.5.15 with deterministic embeddings. It exercised
+vector and hybrid retrieval, BM25-only hydration, optional reranking, SQL
+eligibility and rollback, deletion-pending exclusion, and citation contracts.
+The runner removed its PostgreSQL container after the suite.
