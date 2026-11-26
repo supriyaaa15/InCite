@@ -1,3 +1,6 @@
+from typing import Literal
+
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -34,10 +37,15 @@ class Settings(BaseSettings):
     # BM25 + RRF and CrossEncoder reranking are used alongside vector search.
     # "vector" = vector search only. "hybrid" = BM25 + Chroma vector + RRF.
     # "hybrid_rerank" = BM25 + Chroma vector + RRF (top-15) + CrossEncoder rerank.
-    RETRIEVAL_MODE: str = "vector"   # "vector" | "hybrid" | "hybrid_rerank"
+    RETRIEVAL_MODE: Literal["vector", "hybrid", "hybrid_rerank"] = "vector"
     BM25_RRF_K: int = 60
     RERANK_POOL_K: int = 15
     RERANKER_MODEL: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+    @field_validator("RETRIEVAL_MODE", mode="before")
+    @classmethod
+    def normalize_retrieval_mode(cls, value: object) -> object:
+        return value.lower() if isinstance(value, str) else value
 
     # Confidence-aware RAG (Days 28-29, recalibrated Day 30). Two
     # boundaries, not one — see docs/design-decisions.md for why a single
