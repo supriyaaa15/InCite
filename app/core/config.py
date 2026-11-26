@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     # BM25 + RRF and CrossEncoder reranking are used alongside vector search.
     # "vector" = vector search only. "hybrid" = BM25 + Chroma vector + RRF.
     # "hybrid_rerank" = BM25 + Chroma vector + RRF (top-15) + CrossEncoder rerank.
-    RETRIEVAL_MODE: Literal["vector", "hybrid", "hybrid_rerank"] = "vector"
+    RETRIEVAL_MODE: Literal["vector", "hybrid", "hybrid_rerank"] = "hybrid"
     BM25_RRF_K: int = 60
     RERANK_POOL_K: int = 15
     RERANKER_MODEL: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"

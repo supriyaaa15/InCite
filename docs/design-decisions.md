@@ -23,7 +23,7 @@
   the Groq SDK directly, and retrieval uses the local `RetrievedChunk` type and a
   cached SentenceTransformer.
 - [ADR 004 — Native Chroma retrieval](decisions/004-native-chroma-vector-retrieval.md).
-  Vector is the configured default. Optional hybrid modes fuse independent
+  Hybrid is the default. The hybrid modes fuse independent
   vector and BM25 pools, fetch eligible BM25-only hits, and can apply CrossEncoder
   reranking. See the [current retrieval flow](architecture.md#ingestion-and-retrieval).
 

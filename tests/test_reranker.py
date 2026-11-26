@@ -128,6 +128,37 @@ class TestHybridRerankPipeline(unittest.TestCase):
             self.assertIsInstance(first_score, float)
 
 
+    def test_large_result_limit_respects_reranker_pool_on_success_and_failure(self):
+        pool_size = settings.RERANK_POOL_K
+        self.assertEqual(pool_size, 15)
+        for fails in (False, True):
+            with self.subTest(fails=fails):
+                collection_id, query, vector_lookup, bm25_results, db = _get_mock_retrieval_deps()
+                self.assertGreater(len(vector_lookup), pool_size)
+                reranker = MagicMock()
+                reranker.predict.side_effect = (
+                    RuntimeError("Inference failed") if fails else lambda pairs: list(range(len(pairs)))
+                )
+
+                with patch.object(settings, "RETRIEVAL_MODE", "hybrid_rerank"), \
+                     patch.object(retrieval_service, "_vector_retrieve", return_value=([], vector_lookup)), \
+                     patch.object(retrieval_service, "_bm25_retrieve", return_value=bm25_results), \
+                     patch.object(retrieval_service, "_get_reranker", return_value=reranker):
+                    results = retrieval_service.retrieve(collection_id, query, db, top_k=30)
+
+                reranker.predict.assert_called_once()
+                self.assertEqual(len(reranker.predict.call_args.args[0]), pool_size)
+                self.assertEqual(len(results), pool_size)
+                expected_ids = list(vector_lookup)[:pool_size]
+                if not fails:
+                    expected_ids.reverse()
+                self.assertEqual(
+                    [retrieval_service._chunk_id(chunk) for chunk, _ in results],
+                    expected_ids,
+                )
+                self.assertTrue(all((chunk.metadata["_rerank_score"] is None) == fails for chunk, _ in results))
+
+
 class TestExistingModesNonRegression(unittest.TestCase):
     """Verifies vector and hybrid modes remain completely unchanged."""
 

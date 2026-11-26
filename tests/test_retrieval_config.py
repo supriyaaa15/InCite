@@ -8,9 +8,9 @@ def load_settings():
     return Settings(_env_file=None, JWT_SECRET="synthetic-test-secret", GROQ_API_KEY="synthetic-test-key")
 
 
-def test_retrieval_mode_defaults_to_vector(monkeypatch):
+def test_retrieval_mode_defaults_to_hybrid(monkeypatch):
     monkeypatch.delenv("RETRIEVAL_MODE", raising=False)
-    assert load_settings().RETRIEVAL_MODE == "vector"
+    assert load_settings().RETRIEVAL_MODE == "hybrid"
 
 
 @pytest.mark.parametrize(

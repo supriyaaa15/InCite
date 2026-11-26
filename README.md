@@ -14,7 +14,7 @@ InCite is a multi-user PDF RAG (Retrieval-Augmented Generation) application wher
 - **Dense Vector Retrieval**: Local semantic vector search powered by `sentence-transformers/all-MiniLM-L6-v2` embeddings and embedded Chroma vector database (`PersistentClient`).
 - **Lexical BM25 Retrieval**: In-memory Okapi BM25 keyword search (`rank-bm25`) scoped per collection to capture exact terms, codes, and technical names.
 - **Hybrid Retrieval (RRF)**: Reciprocal Rank Fusion combines independent vector and BM25 candidate pools ($k=60$ by default).
-- **Configurable Retrieval Modes**: Vector search is the configured default. Hybrid BM25 + vector search and hybrid with CrossEncoder reranking are optional.
+- **Configurable Retrieval Modes**: Hybrid BM25 + vector search is the default. Vector-only search and hybrid with CrossEncoder reranking are optional.
 - **Grounded answer generation** uses the official Groq Python SDK for QA, comparison, and recommendation, with fallback across configured models.
 - **Citations for QA**: Structured citations identify the source document filename, page number, and relevant text snippet.
 - **Confidence-Aware Filtering**: For QA, `MIN_CITATION_SCORE` filters weak evidence, and medium and high confidence thresholds classify the remaining evidence.
@@ -84,10 +84,10 @@ The InCite end-to-end RAG execution flow operates as follows:
 
 InCite implements and evaluates three distinct retrieval configurations:
 
-### 1. Vector Search (`RETRIEVAL_MODE="vector"`) — Configured Default
+### 1. Vector Search (`RETRIEVAL_MODE="vector"`)
 Dense vector search using `all-MiniLM-L6-v2` embeddings and cosine distance in Chroma. Captures semantic intent but can miss exact keyword matches.
 
-### 2. Hybrid Retrieval (`RETRIEVAL_MODE="hybrid"`)
+### 2. Hybrid Retrieval (`RETRIEVAL_MODE="hybrid"`) — Default
 Builds independent vector and BM25 pools of up to four times the requested result count each. Reciprocal Rank Fusion (RRF, $k=60$) ranks their union using the original rank positions. Eligible hits found only by BM25 are fetched from Chroma, and their metadata is checked against the requested chunk ID.
 
 $$\text{RRF Score} = \sum_{m \in M} \frac{1}{k + r_m(d)}$$
@@ -145,7 +145,7 @@ These are historical measurements from local labeled datasets. The historical no
 
 - In these runs, hybrid retrieval improved Recall@3 and MRR on both datasets and increased p95 latency by 20 ms on the human set and 33 ms on the synthetic set.
 - Reranking reduced these relevance metrics on the human set and improved them on the synthetic set. It increased p95 latency in both runs.
-- The current code defaults to `vector`. Hybrid and reranking can be enabled independently of these historical findings.
+- The current code defaults to `hybrid`. Set `RETRIEVAL_MODE=vector` for vector-only retrieval or `RETRIEVAL_MODE=hybrid_rerank` to opt into reranking.
 
 ---
 
@@ -273,7 +273,7 @@ Configured in `.env` based on `.env.example`:
 | `MEDIUM_CONFIDENCE_THRESHOLD` | Threshold for medium confidence | `0.20` |
 | `HIGH_CONFIDENCE_THRESHOLD` | Threshold for high confidence | `0.45` |
 | `EMBEDDING_MODEL` | HuggingFace embedding model | `sentence-transformers/all-MiniLM-L6-v2` |
-| `RETRIEVAL_MODE` | Active retrieval mode | `vector` (`vector` \| `hybrid` \| `hybrid_rerank`) |
+| `RETRIEVAL_MODE` | Active retrieval mode | `hybrid` (`vector` \| `hybrid` \| `hybrid_rerank`) |
 | `BM25_RRF_K` | Reciprocal Rank Fusion constant $k$ | `60` |
 | `RERANK_POOL_K` | Maximum eligible candidates passed to the reranker | `15` |
 | `RERANKER_MODEL` | CrossEncoder model | `cross-encoder/ms-marco-MiniLM-L-6-v2` |

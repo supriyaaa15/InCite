@@ -42,7 +42,7 @@ flowchart TD
     Refusal --> Response
 ```
 
-Vector is the configured default. The service embeds each query as a one-element batch using the same cached MiniLM model as ingestion. Native Chroma returns ordered results with raw cosine distances. Retrieval uses the local, Pydantic-backed `RetrievedChunk` type for both vector hits and BM25-only hydration.
+Hybrid is the default. Set `RETRIEVAL_MODE=vector` for vector-only search or `RETRIEVAL_MODE=hybrid_rerank` to opt into CrossEncoder reranking. The service embeds each query as a one-element batch using the same cached MiniLM model as ingestion. Native Chroma returns ordered results with raw cosine distances. Retrieval uses the local, Pydantic-backed `RetrievedChunk` type for both vector hits and BM25-only hydration.
 
 Hybrid modes search independent vector and BM25 pools. PostgreSQL checks candidate document IDs in a batch, excludes pending or unavailable documents, and supplies the filenames used in responses and prompts. Hybrid retrieval verifies hydrated chunk IDs and fuses candidates using their original ranks. Optional `hybrid_rerank` applies a CrossEncoder to eligible candidates and falls back to RRF order on reranker failure. A failed SQL eligibility check yields no evidence. See [ADR 001](decisions/001-postgresql-document-eligibility.md), [ADR 004](decisions/004-native-chroma-vector-retrieval.md), and [ADR 006](decisions/006-remove-langchain-core.md).
 

@@ -2,7 +2,9 @@
 
 **Status** — Implemented. [ADR 002](002-reliable-deletion-lifecycle.md)
 extends eligibility to deletion-pending documents and collections. The
-original cleanup proposal below predates that implementation.
+original cleanup proposal below predates that implementation. The vector
+default described here is historical. See the [architecture guide](../architecture.md)
+for the current default.
 
 ## Context
 
