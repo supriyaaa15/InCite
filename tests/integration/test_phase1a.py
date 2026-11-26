@@ -206,7 +206,8 @@ def corpus():
         db.commit()
         yield SimpleNamespace(
             db=db, store=store, seed=seed, chunks=chunks, collection_id=collection_id,
-            second_owned_id=second_owned_id, session_id=session_id, owner_id=owner_id, other_user_id=other_user_id,
+            second_owned_id=second_owned_id, foreign_id=foreign_id, session_id=session_id,
+            owner_id=owner_id, other_user_id=other_user_id,
         )
 
 
@@ -781,3 +782,100 @@ def test_postgres_eligibility_error_rolls_back_and_refuses(corpus, monkeypatch, 
     assert result[3] == []
     assert provider == []
     assert corpus.db.scalar(select(Message.content).where(Message.session_id == corpus.session_id).order_by(Message.created_at.desc()).limit(1)) == result[1]
+
+
+
+@pytest.mark.parametrize(("case", "expected"), [
+    ("match", None),
+    ("missing_sql", "missing SQL chunk"),
+    ("stale_vector", "stale Chroma vector without SQL chunk"),
+    ("wrong_owner", "wrong document collection or owner"),
+    ("not_ready", "document is ineligible"),
+    ("pending", "document is ineligible"),
+    ("text", "SQL and Chroma text mismatch"),
+    ("missing_vector", "missing Chroma vector"),
+    ("duplicate", "duplicate store ID"),
+    ("identity", "Chroma chunk identity mismatch"),
+    ("store_error", "Store export failed or collection is unavailable"),
+    ("unavailable", "SQL collection is unowned, unavailable or pending deletion"),
+])
+def test_pilot_corpus_verification(corpus, case, expected):
+    from hashlib import sha256
+
+    from app.models.chunk import Chunk
+    from scripts.verify_retrieval_corpus import verify
+
+    doc_id, chunk_id = corpus.chunks["alpha"]
+    content = "Synthetic alpha evidence."
+    use_sql = case not in {"missing_sql", "stale_vector"}
+    if use_sql:
+        corpus.db.add(Chunk(
+            document_id=doc_id, page_number=1, chunk_index=0, chroma_id=chunk_id,
+            content="Conflicting fixture text." if case == "text" else content,
+        ))
+    if case == "duplicate":
+        corpus.db.add(Chunk(
+            document_id=doc_id, page_number=1, chunk_index=0, chroma_id=chunk_id, content=content,
+        ))
+    if case == "wrong_owner":
+        corpus.db.get(Document, doc_id).collection_id = corpus.foreign_id
+    if case == "not_ready":
+        corpus.db.get(Document, doc_id).status = DocumentStatus.processing
+    if case == "pending":
+        corpus.db.get(Document, doc_id).delete_requested_at = datetime.now(timezone.utc)
+    if case in {"missing_vector", "missing_sql"}:
+        corpus.store.delete(ids=[chunk_id])
+    if case == "identity":
+        corpus.store.update(ids=[chunk_id], metadatas=[{
+            "document_id": str(doc_id), "page_number": 2, "chunk_index": 0,
+        }])
+    corpus.db.commit()
+
+    identity = {"corpus_id": "test-corpus", "index_id": "test-index", "collection_id": str(corpus.collection_id)}
+    manifest = {**identity, "owner_id": str(corpus.owner_id)}
+    def digest(value):
+        return sha256(value.encode("utf-8")).hexdigest()
+    with SessionLocal() as db:
+        db.execute(text("SET TRANSACTION READ ONLY"))
+        sql_rows = db.execute(text("""
+            SELECT k.chroma_id AS id, CAST(k.document_id AS text) AS document_id,
+                   k.page_number, k.chunk_index, k.content, d.filename,
+                   CAST(d.collection_id AS text) AS collection_id,
+                   CAST(c.user_id AS text) AS owner_id, CAST(d.status AS text) AS document_status,
+                   d.delete_requested_at IS NOT NULL AS document_pending
+            FROM chunks k JOIN documents d ON d.id = k.document_id
+            JOIN collections c ON c.id = d.collection_id
+            WHERE k.chroma_id = :chunk_id
+        """), {"chunk_id": chunk_id}).mappings().all()
+        collection = db.get(Collection, corpus.collection_id if case != "unavailable" else uuid4())
+        sql = {
+            **identity, "status": "error" if case == "store_error" else "ok",
+            "owner_id": str(collection.user_id) if collection else None,
+            "collection_pending": collection.delete_requested_at is not None if collection else None,
+            "rows": [{**row, "text_sha256": digest(row["content"])} for row in sql_rows],
+        }
+    response = corpus.store.get(ids=[chunk_id], include=["documents", "metadatas", "embeddings"])
+    chroma = {**identity, "status": "ok", "rows": [
+        {
+            **metadata, "id": hit_id, "text_sha256": digest(doc),
+            "vector_present": embedding is not None and len(embedding) > 0,
+        }
+        for hit_id, metadata, doc, embedding in zip(
+            response["ids"], response["metadatas"], response["documents"], response["embeddings"],
+        )
+    ]}
+    questions = [{
+        "_id": "fixture", "question": "What is in the evidence?",
+        "collection_id": str(corpus.collection_id),
+        "expected_chunks": [chunk_id], "expected_documents": ["alpha.pdf"],
+    }]
+    if case == "store_error":
+        from sqlalchemy.exc import DBAPIError
+
+        with SessionLocal() as db, pytest.raises(DBAPIError):
+            db.execute(text("SELECT 1 / 0"))
+    if case in {"unavailable", "store_error"}:
+        with pytest.raises(ValueError, match=expected):
+            verify(manifest, sql, chroma, questions)
+    else:
+        assert verify(manifest, sql, chroma, questions) == (1, [] if expected is None else [(1, 1, expected)])
