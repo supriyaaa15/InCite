@@ -42,7 +42,7 @@ flowchart TD
     Refusal --> Response
 ```
 
-Hybrid is the default. Set `RETRIEVAL_MODE=vector` for vector-only search or `RETRIEVAL_MODE=hybrid_rerank` to opt into CrossEncoder reranking. The service embeds each query as a one-element batch using the same cached MiniLM model as ingestion. Native Chroma returns ordered results with raw cosine distances. Retrieval uses the local, Pydantic-backed `RetrievedChunk` type for both vector hits and BM25-only hydration.
+Hybrid is the default. See [ADR 007](decisions/007-hybrid-retrieval-default.md) for the evidence behind this choice. Set `RETRIEVAL_MODE=vector` for vector-only search or `RETRIEVAL_MODE=hybrid_rerank` to opt into CrossEncoder reranking. The service embeds each query as a one-element batch using the same cached MiniLM model as ingestion. Native Chroma returns ordered results with raw cosine distances. Retrieval uses the local, Pydantic-backed `RetrievedChunk` type for both vector hits and BM25-only hydration.
 
 Hybrid modes search independent vector and BM25 pools. PostgreSQL checks candidate document IDs in a batch, excludes pending or unavailable documents, and supplies the filenames used in responses and prompts. Hybrid retrieval verifies hydrated chunk IDs and fuses candidates using their original ranks. Optional `hybrid_rerank` applies a CrossEncoder to eligible candidates and falls back to RRF order on reranker failure. A failed SQL eligibility check yields no evidence. See [ADR 001](decisions/001-postgresql-document-eligibility.md), [ADR 004](decisions/004-native-chroma-vector-retrieval.md), and [ADR 006](decisions/006-remove-langchain-core.md).
 
@@ -66,5 +66,5 @@ For upgrades, stop old writers, back up PostgreSQL, Chroma, and uploads, then ru
 
 - Eligibility is a snapshot. A request past the eligibility check can still finish during concurrent deletion. Retained history can include old citations and excerpts.
 - Cleanup assumes cooperating writers and one process per embedded store. See ADR 002 for recovery limits, including legacy artifacts with incomplete ownership data and Linux full-process crash verification.
-- Current ingestion requires extractable PDF text. OCR, table extraction, and multimodal indexing are future proposals. Hybrid and reranking are already implemented as optional modes.
+- Current ingestion requires extractable PDF text. OCR, table extraction, and multimodal indexing are future proposals.
 - The [historical design journal](design-decisions.md) records earlier provider, hosting, and retrieval choices. See the [engineering log](engineering-log.md) for the verification associated with each milestone.

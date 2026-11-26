@@ -74,6 +74,16 @@ Run the synthetic verification through the PostgreSQL 16 Docker runner. It provi
 
 The original three pilot PDFs and matching index manifest were not found in the approved repository files. A clean synthetic verification exercises the workflow. It cannot establish relevance, original source identity, or index alignment for the 30 local pilot questions.
 
-## Future benchmark
+## Benchmark protocol
 
-Freeze the reviewed labels and use the same held-out questions and result depth for vector, hybrid, and hybrid with reranking. Report Recall@1/3/5, Precision@5, and MRR@5 using a declared binary relevance rule. Add nDCG@5 if reviewers agree on graded relevance. Record cold and warm latency separately, log mode fallbacks and failures, and keep human and synthetic results separate. The pilot tests the protocol before a larger held-out evaluation.
+Freeze source questions and answers before retrieval. Separate tuning questions from held-out questions. A holdout from the same PDFs tests new questions on a familiar corpus. Hold out documents to test generalization. Report human-authored and synthetic results separately, and state whether judgments were AI-assisted or independently human-reviewed.
+
+Use identical questions, index versions, eligibility checks, and retrieval depth. Export only fully relevant chunks in the binary expected labels. Keep partial grades separately for graded analysis. Review previously unjudged results before scoring. Pooled labels can omit valid evidence outside the pool.
+
+- **Recall@K** averages each question's fraction of relevant labels found at ranks 1, 3, and 5.
+- **Precision@5** divides relevant hits by five, including unfilled slots.
+- **MRR@5** averages the reciprocal rank of the first relevant hit in the top five. A miss contributes zero.
+
+Use the [benchmark CLI](../README.md#running-the-retrieval-benchmark) with approved labeled inputs. Use a separate single-mode run for vector and hybrid. The comparison flag runs all three modes. The runner requires a depth of at least five and rejects logged retrieval failures and unexpected fallbacks. A valid empty result is a miss. The two-mode held-out pilot used a separate discovery run, then scored the saved rankings after checking every returned label.
+
+Record cold and warm latency separately on the same hardware. Warm each mode and rotate the mode order for paired timing. Record query count alongside nearest-rank p50 and p95. Keep returned IDs and per-question results outside Git. See [ADR 007](decisions/007-hybrid-retrieval-default.md) for the provisional findings.
