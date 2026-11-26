@@ -4,7 +4,7 @@ benchmark_retrieval_chunk.py — chunk-level retrieval quality + latency benchma
 
 Primary evaluation:
   - Recall@1 / Recall@3 / Recall@5   (chunk-level)
-  - MRR                              (first relevant chunk rank)
+  - Precision@5 and MRR@5
   - Latency p50 / p95 / mean (ms)
 
 Optional secondary evaluation:
@@ -32,7 +32,12 @@ app.services directly.
 """
 
 import argparse
+from contextlib import redirect_stdout
+from io import StringIO
 import json
+import logging
+import math
+import re
 import statistics
 import sys
 import time
@@ -154,11 +159,44 @@ def _ranked_chunk_ids(retrieved, citations) -> list[str]:
 
 # ── Core single-question run ─────────────────────────────────────────────────
 
+def _binary_metrics(ranked: list[str], expected: set[str]) -> dict:
+    ranked = [chunk_id.lower() for chunk_id in ranked]
+    if len(ranked) != len(set(ranked)):
+        raise ValueError("Retrieval returned duplicate chunk IDs.")
+    first = next((i for i, chunk_id in enumerate(ranked[:5], 1) if chunk_id in expected), None)
+    return {
+        **{f"recall_at_{k}": len(expected.intersection(ranked[:k])) / len(expected) for k in (1, 3, 5)},
+        "precision_at_5": len(expected.intersection(ranked[:5])) / 5,
+        "rank_of_first_hit": first,
+        "reciprocal_rank": 1.0 / first if first is not None else 0.0,
+    }
+
+
+def _checked_retrieve(service, collection_id, query, db, mode, top_k):
+    """Reject logged failures and implicit mode changes before scoring."""
+    trace, warnings = StringIO(), StringIO()
+    handler = logging.StreamHandler(warnings)
+    handler.setLevel(logging.WARNING)
+    service.logger.addHandler(handler)
+    try:
+        with redirect_stdout(trace):
+            results = service.retrieve(collection_id, query, db, top_k=top_k)
+    finally:
+        service.logger.removeHandler(handler)
+    match = re.search(r"^Actual Mode\s*:\s*(.+)$", trace.getvalue(), re.MULTILINE)
+    actual = match[1].strip().split("   [", 1)[0] if match else None
+    # Clean early exits have no mode trace. A logged SQL error is never a miss.
+    if warnings.getvalue() or (actual != mode and (results or actual is not None)):
+        reason = warnings.getvalue().strip() or f"Unexpected retrieval mode: {actual!r}"
+        raise RuntimeError(reason)
+    return results, actual
+
+
 def _run_one(question: dict, mode: str, top_k: int) -> dict:
     """
     Runs retrieval for one question in the given mode and scores it.
 
-    Chunk-level MRR uses the 1-based rank of the first retrieved chunk whose
+    MRR@5 uses the 1-based rank of the first chunk in the top five whose
     ID appears in expected_chunks.
 
     Recall@K is:
@@ -166,6 +204,7 @@ def _run_one(question: dict, mode: str, top_k: int) -> dict:
 
     This supports questions with multiple answer-bearing chunks.
     """
+    from app.core.chroma_client import get_existing_collection_store
     from app.core.config import settings
     from app.core.database import SessionLocal
     from app.services import retrieval_service
@@ -191,48 +230,28 @@ def _run_one(question: dict, mode: str, top_k: int) -> dict:
                 "before running the benchmark."
             )
 
-        t0 = time.perf_counter()
-        retrieved = retrieval_service.retrieve(
-            collection_id, query, db, top_k=top_k
-        )
+        try:
+            if get_existing_collection_store(str(collection_id)) is None:
+                raise RuntimeError("Benchmark Chroma collection is unavailable.")
+            t0 = time.perf_counter()
+            retrieved, actual_mode = _checked_retrieve(retrieval_service, collection_id, query, db, mode, top_k)
+        except Exception as exc:
+            raise RuntimeError(f"{question.get('_id', '<unknown>')} ({mode}): {exc}") from exc
         latency_ms = (time.perf_counter() - t0) * 1000
 
         citations = retrieval_service.build_citations(retrieved)
         ranked_chunk_ids = _ranked_chunk_ids(retrieved, citations)
 
-        # Only the first occurrence of a chunk matters for ranking.
-        rank_of_first_hit = None
-        for i, chunk_id in enumerate(ranked_chunk_ids, start=1):
-            if chunk_id.lower() in expected_chunks:
-                rank_of_first_hit = i
-                break
-
-        def recall_at(k: int):
-            retrieved_at_k = {
-                chunk_id.lower() for chunk_id in ranked_chunk_ids[:k]
-            }
-            return len(expected_chunks & retrieved_at_k) / len(expected_chunks)
-
-        recall1 = recall_at(1)
-        recall3 = recall_at(3)
-        recall5 = recall_at(5)
-
-        reciprocal_rank = (
-            1.0 / rank_of_first_hit if rank_of_first_hit else 0.0
-        )
-
         result = {
             "question": query,
             "id": question.get("_id"),
             "mode": mode,
+            "actual_mode": actual_mode,
+            "status": "ok" if ranked_chunk_ids else "empty",
             "retrieved": citations,
             "retrieved_chunk_ids": ranked_chunk_ids,
             "latency_ms": latency_ms,
-            "rank_of_first_hit": rank_of_first_hit,
-            "reciprocal_rank": reciprocal_rank,
-            "recall_at_1": recall1,
-            "recall_at_3": recall3,
-            "recall_at_5": recall5,
+            **_binary_metrics(ranked_chunk_ids, expected_chunks),
             "expected_chunks": sorted(expected_chunks),
         }
 
@@ -281,7 +300,7 @@ def _percentile(values: list[float], p: float) -> float:
     if not values:
         return 0.0
     s = sorted(values)
-    idx = min(int(len(s) * p), len(s) - 1)
+    idx = max(0, math.ceil(len(s) * p) - 1)
     return s[idx]
 
 
@@ -307,6 +326,7 @@ def _aggregate(results: list[dict]) -> dict:
         "recall1": recall1,
         "recall3": recall3,
         "recall5": recall5,
+        "precision5": statistics.mean(r["precision_at_5"] for r in results) if n else 0.0,
         "mrr": mrr,
         "latency_mean": statistics.mean(latencies) if latencies else 0.0,
         "latency_p50": _percentile(latencies, 0.50),
@@ -339,7 +359,8 @@ def _print_summary(label: str, agg: dict) -> None:
     print(f"  Recall@1 : {_pct(agg['recall1'])}")
     print(f"  Recall@3 : {_pct(agg['recall3'])}")
     print(f"  Recall@5 : {_pct(agg['recall5'])}")
-    print(f"  MRR      : {agg['mrr']:.3f}")
+    print(f"  Precision@5: {_pct(agg['precision5'])}")
+    print(f"  MRR@5    : {agg['mrr']:.3f}")
     print(
         f"  Latency  mean={agg['latency_mean']:.0f}ms  "
         f"p50={agg['latency_p50']:.0f}ms  "
@@ -400,7 +421,11 @@ def _write_markdown_report(
             f"{rerank_agg['recall5'] - hyb_agg['recall5']:+.1%} |"
         )
         lines.append(
-            f"| MRR | {vec_agg['mrr']:.3f} | {hyb_agg['mrr']:.3f} | {rerank_agg['mrr']:.3f} | "
+            f"| Precision@5 | {_pct(vec_agg['precision5'])} | {_pct(hyb_agg['precision5'])} | "
+            f"{_pct(rerank_agg['precision5'])} | {rerank_agg['precision5'] - hyb_agg['precision5']:+.1%} |"
+        )
+        lines.append(
+            f"| MRR@5 | {vec_agg['mrr']:.3f} | {hyb_agg['mrr']:.3f} | {rerank_agg['mrr']:.3f} | "
             f"{rerank_agg['mrr'] - hyb_agg['mrr']:+.3f} |"
         )
         lines.append(
@@ -437,7 +462,11 @@ def _write_markdown_report(
             f"{hyb_agg['recall5'] - vec_agg['recall5']:+.1%} |"
         )
         lines.append(
-            f"| MRR | {vec_agg['mrr']:.3f} | {hyb_agg['mrr']:.3f} | "
+            f"| Precision@5 | {_pct(vec_agg['precision5'])} | {_pct(hyb_agg['precision5'])} | "
+            f"{hyb_agg['precision5'] - vec_agg['precision5']:+.1%} |"
+        )
+        lines.append(
+            f"| MRR@5 | {vec_agg['mrr']:.3f} | {hyb_agg['mrr']:.3f} | "
             f"{hyb_agg['mrr'] - vec_agg['mrr']:+.3f} |"
         )
         lines.append(
@@ -463,7 +492,8 @@ def _write_markdown_report(
             lines.append(f"| Recall@1 | {_pct(agg['recall1'])} |")
             lines.append(f"| Recall@3 | {_pct(agg['recall3'])} |")
             lines.append(f"| Recall@5 | {_pct(agg['recall5'])} |")
-            lines.append(f"| MRR | {agg['mrr']:.3f} |")
+            lines.append(f"| Precision@5 | {_pct(agg['precision5'])} |")
+            lines.append(f"| MRR@5 | {agg['mrr']:.3f} |")
             lines.append(f"| Latency mean (ms) | {agg['latency_mean']:.0f} |")
             lines.append(f"| Latency p50 (ms) | {agg['latency_p50']:.0f} |")
             lines.append(f"| Latency p95 (ms) | {agg['latency_p95']:.0f} |")
@@ -476,7 +506,8 @@ def _write_markdown_report(
         "retrieved within the first K results."
     )
     lines.append(
-        "- MRR uses the rank of the first labeled answer-bearing chunk."
+        "- Precision@5 divides binary hits by five, including any unfilled slots. "
+        "MRR@5 uses the first relevant rank within the top five."
     )
     lines.append(
         "- The same questions and expected chunk IDs are used for all retrieval modes, so comparisons are paired."
@@ -554,6 +585,8 @@ def main() -> None:
     group.add_argument("--mode", choices=["vector", "hybrid", "hybrid_rerank"])
     group.add_argument("--compare", action="store_true")
     args = parser.parse_args()
+    if args.top_k < 5:
+        parser.error("--top-k must be at least 5 for the reported cutoffs.")
 
     try:
         questions = _load_questions(args.questions)
@@ -583,7 +616,7 @@ def main() -> None:
         print(
             f"\nDelta (Hybrid+Rerank − Hybrid): "
             f"Recall@3 {rerank_agg['recall3'] - hyb_agg['recall3']:+.1%}, "
-            f"MRR {rerank_agg['mrr'] - hyb_agg['mrr']:+.3f}, "
+            f"MRR@5 {rerank_agg['mrr'] - hyb_agg['mrr']:+.3f}, "
             f"p95 latency "
             f"{rerank_agg['latency_p95'] - hyb_agg['latency_p95']:+.0f}ms"
         )
